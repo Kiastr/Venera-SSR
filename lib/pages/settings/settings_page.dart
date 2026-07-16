@@ -1,7 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
 import 'package:flutter_reorderable_grid_view/widgets/reorderable_builder.dart';
+import 'package:file_selector/file_selector.dart' as file_selector;
 import 'package:local_auth/local_auth.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:venera/components/components.dart';
@@ -19,6 +23,8 @@ import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/io.dart';
 import 'package:venera/utils/translations.dart';
 import 'package:venera/utils/anime4k/anime4k_service.dart';
+import 'package:venera/utils/colorization/colorization_processor.dart';
+import 'package:venera/utils/colorization/colorization_service.dart';
 import 'package:venera/pages/reader/reader.dart';
 import 'package:yaml/yaml.dart';
 
@@ -32,6 +38,7 @@ part 'about.dart';
 part 'network.dart';
 part 'debug.dart';
 part 'anime4k.dart';
+part 'colorization.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({this.initialPage = -1, super.key});
@@ -58,6 +65,7 @@ class _SettingsPageState extends State<SettingsPage> {
     "Network",
     "About",
     "Anime4K",
+    "Colorization",
     "Debug"
   ];
 
@@ -70,6 +78,7 @@ class _SettingsPageState extends State<SettingsPage> {
     Icons.public,
     Icons.info,
     Icons.auto_awesome,
+    Icons.palette,
     Icons.bug_report,
   ];
 
@@ -267,7 +276,8 @@ class _SettingsPageState extends State<SettingsPage> {
       5 => const NetworkSettings(),
       6 => const AboutSettings(),
       7 => const Anime4KSettings(),
-      8 => const DebugPage(),
+      8 => const ColorizationSettings(),
+      9 => const DebugPage(),
       _ => throw UnimplementedError()
     };
   }
@@ -294,7 +304,8 @@ class _SettingsDetailPage extends StatelessWidget {
       5 => const NetworkSettings(),
       6 => const AboutSettings(),
       7 => const Anime4KSettings(),
-      8 => const DebugPage(),
+      8 => const ColorizationSettings(),
+      9 => const DebugPage(),
       _ => throw UnimplementedError()
     };
   }

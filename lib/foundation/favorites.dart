@@ -938,7 +938,7 @@ class LocalFavoritesManager with ChangeNotifier {
       markAsRead(id, type);
       return;
     }
-    var followUpdatesFolder = appdata.settings['followUpdatesFolder'];
+    var followUpdatesFolder = appdata.settings['followUpdatesFolder'] as String?;
     for (final folder in folderNames) {
       var rows = _db.select("""
         select * from "$folder"
@@ -1229,8 +1229,8 @@ class LocalFavoritesManager with ChangeNotifier {
   }
 
   void markAsRead(String id, ComicType type) {
-    var folder = appdata.settings['followUpdatesFolder'];
-    if (!existsFolder(folder)) {
+    var folder = appdata.settings['followUpdatesFolder'] as String?;
+    if (folder == null || !existsFolder(folder)) {
       return;
     }
     _db.execute("""

@@ -157,13 +157,68 @@ class _ReaderSettingsState extends State<ReaderSettings> {
         ).toSliver(),
         _SwitchSetting(
           title: "Enable Anime4K".tl,
+          titleStyle: TextStyle(color: context.colorScheme.primary),
           settingKey: "enableAnime4K",
           onChanged: () {
+            PaintingBinding.instance.imageCache.clear();
             ComicImage.clear();
             widget.onChanged?.call("enableAnime4K");
           },
           comicId: isEnabledSpecificSettings ? widget.comicId : null,
           comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+        ).toSliver(),
+        _SwitchSetting(
+          title: "Enable Colorization(AI上色)".tl,
+          titleStyle: TextStyle(
+            color: context.colorScheme.primary,
+            fontWeight: FontWeight.bold,
+          ),
+          settingKey: "enableColorization",
+          onChanged: () {
+            PaintingBinding.instance.imageCache.clear();
+            ComicImage.clear();
+            widget.onChanged?.call("enableColorization");
+          },
+          beforeChange: (newValue) async {
+            if (!newValue) return true;
+            final downloaded = await ColorizationModelManager.isModelDownloaded;
+            if (downloaded) return true;
+            if (!mounted) return false;
+            showDialog(
+              context: context,
+              builder: (dialogContext) {
+                return ContentDialog(
+                  title: "Model Not Downloaded".tl,
+                  content: Text(
+                    "The colorization model is not downloaded. Please download it in Colorization Settings to enable AI colorization."
+                        .tl,
+                  ).paddingHorizontal(16).fixWidth(double.infinity),
+                  actions: [
+                    Button.filled(
+                      onPressed: () {
+                        dialogContext.pop();
+                        context.to(() => const ColorizationSettings());
+                      },
+                      child: Text("Go to Settings".tl),
+                    ),
+                    Button.outlined(
+                      onPressed: dialogContext.pop,
+                      child: Text("Cancel".tl),
+                    ),
+                  ],
+                );
+              },
+            );
+            return false;
+          },
+          comicId: isEnabledSpecificSettings ? widget.comicId : null,
+          comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+        ).toSliver(),
+        ListTile(
+          title: Text("Colorization Settings".tl),
+          subtitle: Text("Manage model and intensity".tl),
+          trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+          onTap: () => context.to(() => const ColorizationSettings()),
         ).toSliver(),
         SelectSetting(
           title: "Reading mode".tl,

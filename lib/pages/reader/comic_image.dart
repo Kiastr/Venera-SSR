@@ -88,13 +88,36 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   Uint8List? _upscaledBytes;
   bool _isUpscaling = false;
 
+  // 图像上色相关变量
+  Uint8List? _colorizedBytes;
+  bool _isColorizing = false;
+
   static final Map<int, Size> _cache = {};
 
-  static clear() => _cache.clear();
+  /// 追踪所有活跃的实例，用于在 clear() 时重置所有实例的处理状态
+  static final Set<_ComicImageState> _instances = {};
+
+  static void clear() {
+    _cache.clear();
+    // 重置所有活跃实例的处理状态，并重新触发处理。
+    // 否则 didUpdateWidget 会因 widget.image 未变而不再触发，
+    // 导致开关切换后已显示的图片不重新处理（超分/上色不生效）。
+    for (final instance in _instances) {
+      if (instance.mounted) {
+        instance._upscaledBytes = null;
+        instance._isUpscaling = false;
+        instance._colorizedBytes = null;
+        instance._isColorizing = false;
+        instance._triggerImageUpscale();
+        instance._triggerImageColorization();
+      }
+    }
+  }
 
   @override
   void initState() {
     super.initState();
+    _instances.add(this);
     WidgetsBinding.instance.addObserver(this);
     _scrollAwareContext = DisposableBuildContext<State<ComicImage>>(this);
     widget.onInit?.call(this);
@@ -103,6 +126,7 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   @override
   void dispose() {
     assert(_imageStream != null);
+    _instances.remove(this);
     WidgetsBinding.instance.removeObserver(this);
     _stopListeningToStream();
     _completerHandle?.dispose();
@@ -117,6 +141,7 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
     _updateInvertColors();
     _resolveImage();
     _triggerImageUpscale();
+    _triggerImageColorization();
 
     if (TickerMode.of(context)) {
       _listenToStream();
@@ -131,8 +156,16 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   void didUpdateWidget(ComicImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.image != oldWidget.image) {
+      // 当图像更换时，必须重置已处理的字节数据和处理状态，
+      // 否则 _upscaledBytes/_colorizedBytes 仍指向旧图的结果，
+      // 触发方法会因 "!= null" 提前返回，导致新图永远不会被处理。
+      _upscaledBytes = null;
+      _colorizedBytes = null;
+      _isUpscaling = false;
+      _isColorizing = false;
       _resolveImage();
       _triggerImageUpscale();
+      _triggerImageColorization();
     }
   }
 
@@ -166,16 +199,16 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
 
   /// 触发图像超分处理
   Future<void> _triggerImageUpscale() async {
-    if (Platform.isWindows) return;
+    final provider = _getReaderImageProvider();
+
     // 检查是否启用了 Anime4K
-    bool enableAnime4K = false;
-    if (widget.image is ReaderImageProvider) {
-      final provider = widget.image as ReaderImageProvider;
+    bool enableAnime4K;
+    if (provider != null) {
       enableAnime4K = appdata.settings.getReaderSetting(
         provider.cid,
         provider.sourceKey ?? "",
         'enableAnime4K',
-      );
+      ) == true;
     } else {
       enableAnime4K = appdata.settings['enableAnime4K'] == true;
     }
@@ -191,41 +224,167 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
 
     if (_upscaledBytes != null || _isUpscaling) return;
 
+    // 如果没有可用的图像 provider，不标记为正在处理以避免永久卡住
+    if (provider == null) return;
+
     _isUpscaling = true;
 
     try {
-      // 从 ReaderImageProvider 获取图像数据
-      if (widget.image is ReaderImageProvider) {
-        final provider = widget.image as ReaderImageProvider;
-        final chunkController = StreamController<ImageChunkEvent>();
-        chunkController.stream.listen(null, onError: (_) {});
-        final imageBytes = await provider.load(
-          chunkController,
-          () {},
-        );
-        unawaited(chunkController.close());
+      final chunkController = StreamController<ImageChunkEvent>();
+      chunkController.stream.listen(null, onError: (_) {});
+      final imageBytes = await provider.load(
+        chunkController,
+        () {},
+      );
+      unawaited(chunkController.close());
 
-        final result = await Anime4KService.instance.processImage(
-          imageBytes: imageBytes,
-          cacheKey: provider.key,
-          scaleFactor: (appdata.settings.getReaderSetting(provider.cid, provider.sourceKey ?? "", 'anime4KScaleFactor') as num?)?.toDouble() ?? 2.0,
-          pushStrength: (appdata.settings.getReaderSetting(provider.cid, provider.sourceKey ?? "", 'anime4KPushStrength') as num?)?.toDouble() ?? 0.31,
-          pushGradStrength: (appdata.settings.getReaderSetting(provider.cid, provider.sourceKey ?? "", 'anime4KPushGradStrength') as num?)?.toDouble() ?? 1.0,
-        );
-
-        if (result != null && mounted) {
-          setState(() {
-            _upscaledBytes = result;
-            _isUpscaling = false;
-          });
-        } else {
-          _isUpscaling = false;
-        }
+      if (imageBytes.isEmpty) {
+        Log.warning('ComicImage', 'Anime4K: empty image bytes for ${provider.key}');
+        _isUpscaling = false;
+        return;
       }
-    } catch (e) {
-      Log.error('ComicImage', 'Anime4K processing error: $e');
+
+      // 加载过程中 widget 可能已被销毁
+      if (!mounted) {
+        _isUpscaling = false;
+        return;
+      }
+
+      Log.info('ComicImage', 'Anime4K: start processing ${provider.key}');
+
+      final result = await Anime4KService.instance.processImage(
+        imageBytes: imageBytes,
+        cacheKey: provider.key,
+        scaleFactor: (appdata.settings.getReaderSetting(provider.cid, provider.sourceKey ?? "", 'anime4KScaleFactor') as num?)?.toDouble() ?? 2.0,
+        pushStrength: (appdata.settings.getReaderSetting(provider.cid, provider.sourceKey ?? "", 'anime4KPushStrength') as num?)?.toDouble() ?? 0.31,
+        pushGradStrength: (appdata.settings.getReaderSetting(provider.cid, provider.sourceKey ?? "", 'anime4KPushGradStrength') as num?)?.toDouble() ?? 1.0,
+      );
+
+      if (!mounted) {
+        _isUpscaling = false;
+        return;
+      }
+
+      if (result != null) {
+        Log.info('ComicImage', 'Anime4K: done ${provider.key}');
+        setState(() {
+          _upscaledBytes = result;
+          _isUpscaling = false;
+        });
+      } else {
+        Log.warning('ComicImage', 'Anime4K: null result for ${provider.key}');
+        _isUpscaling = false;
+      }
+    } catch (e, s) {
+      Log.error('ComicImage', 'Anime4K processing error: $e', s);
       _isUpscaling = false;
     }
+  }
+
+  /// 触发图像上色处理
+  Future<void> _triggerImageColorization() async {
+    final provider = _getReaderImageProvider();
+
+    // 检查是否启用了上色功能
+    bool enableColorization;
+    if (provider != null) {
+      enableColorization = appdata.settings.getReaderSetting(
+            provider.cid,
+            provider.sourceKey ?? "",
+            'enableColorization',
+          ) ==
+          true;
+    } else {
+      enableColorization = appdata.settings['enableColorization'] == true;
+    }
+
+    if (!enableColorization) {
+      if (_colorizedBytes != null) {
+        setState(() {
+          _colorizedBytes = null;
+        });
+      }
+      return;
+    }
+
+    if (_colorizedBytes != null || _isColorizing) return;
+
+    // 如果没有可用的图像 provider，不标记为正在处理以避免永久卡住
+    if (provider == null) return;
+
+    // 模型未就绪时重新检测一次（用户可能刚下载模型但服务尚未刷新），
+    // 仍不可用则静默跳过（避免卡住 _isColorizing）
+    if (!ColorizationService.instance.isModelAvailable) {
+      if (!await ColorizationService.instance.checkModelAvailable()) {
+        return;
+      }
+    }
+
+    _isColorizing = true;
+
+    try {
+      final chunkController = StreamController<ImageChunkEvent>();
+      chunkController.stream.listen(null, onError: (_) {});
+      final imageBytes = await provider.load(
+        chunkController,
+        () {},
+      );
+      unawaited(chunkController.close());
+
+      if (imageBytes.isEmpty) {
+        Log.warning('ComicImage', 'Colorization: empty image bytes for ${provider.key}');
+        _isColorizing = false;
+        return;
+      }
+
+      // 加载过程中 widget 可能已被销毁
+      if (!mounted) {
+        _isColorizing = false;
+        return;
+      }
+
+      Log.info('ComicImage', 'Colorization: start processing ${provider.key}');
+
+      final result = await ColorizationService.instance.processImage(
+        imageBytes: imageBytes,
+        cacheKey: provider.key,
+        intensity: (appdata.settings.getReaderSetting(
+              provider.cid,
+              provider.sourceKey ?? "",
+              'colorizationIntensity',
+            ) as num?)?.toDouble() ?? 1.0,
+      );
+
+      if (!mounted) {
+        _isColorizing = false;
+        return;
+      }
+
+      if (result != null) {
+        Log.info('ComicImage', 'Colorization: done ${provider.key}');
+        setState(() {
+          _colorizedBytes = result;
+          _isColorizing = false;
+        });
+      } else {
+        Log.warning('ComicImage', 'Colorization: null result for ${provider.key}');
+        _isColorizing = false;
+      }
+    } catch (e, s) {
+      Log.error('ComicImage', 'Colorization processing error: $e', s);
+      _isColorizing = false;
+    }
+  }
+
+  /// 从可能被 ResizeImage 包装的 widget.image 中提取 ReaderImageProvider
+  ReaderImageProvider? _getReaderImageProvider() {
+    ImageProvider imageProvider = widget.image;
+    if (imageProvider is ResizeImage) {
+      imageProvider = imageProvider.imageProvider;
+    }
+    return imageProvider is ReaderImageProvider
+        ? imageProvider as ReaderImageProvider
+        : null;
   }
 
   void _resolveImage() {
@@ -434,25 +593,43 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
         }
       }
 
-      if (_upscaledBytes != null && _imageInfo != null) {
-        // 使用超分后的图像
-        Widget result = RawImage(
-          image: _imageInfo!.image,
-          debugImageLabel: _imageInfo?.debugLabel,
+      if (_colorizedBytes != null && _imageInfo != null) {
+        // 使用上色后的图像
+        Widget result = Image.memory(
+          _colorizedBytes!,
           width: width,
           height: height,
-          scale: _imageInfo?.scale ?? 1.0,
-          color: widget.color,
-          opacity: widget.opacity,
-          colorBlendMode: widget.colorBlendMode,
-          fit: widget.fit,
+          fit: widget.fit ?? BoxFit.contain,
+          filterQuality: widget.filterQuality,
           alignment: widget.alignment,
           repeat: widget.repeat,
-          centerSlice: widget.centerSlice,
-          matchTextDirection: widget.matchTextDirection,
-          invertColors: _invertColors,
-          isAntiAlias: widget.isAntiAlias,
+        );
+        if (!widget.excludeFromSemantics) {
+          result = Semantics(
+            container: widget.semanticLabel != null,
+            image: true,
+            label: widget.semanticLabel ?? '',
+            child: result,
+          );
+        }
+        result = SizedBox(
+          width: width,
+          height: height,
+          child: Center(
+            child: result,
+          ),
+        );
+        return result;
+      } else if (_upscaledBytes != null && _imageInfo != null) {
+        // 使用超分后的图像
+        Widget result = Image.memory(
+          _upscaledBytes!,
+          width: width,
+          height: height,
+          fit: widget.fit ?? BoxFit.contain,
           filterQuality: widget.filterQuality,
+          alignment: widget.alignment,
+          repeat: widget.repeat,
         );
         if (!widget.excludeFromSemantics) {
           result = Semantics(

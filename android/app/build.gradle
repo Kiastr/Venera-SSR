@@ -91,7 +91,7 @@ android {
         applicationId = "com.github.kiastr.venera_ssr"
         // You can update the following values to match your application needs.
         // For more information, see: https://docs.flutter.dev/deployment/android#reviewing-the-gradle-build-configuration.
-        minSdk = flutter.minSdkVersion
+        minSdk = 24 // onnxruntime requires API 21+; using 24 for better native lib compatibility
         targetSdk = flutter.targetSdkVersion
         versionCode = flutterVersionCode.toInteger()
         versionName = flutterVersionName
@@ -101,12 +101,14 @@ android {
         release {
             minifyEnabled true
             shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             ndk {
                 abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
             }
             signingConfig signingConfigs.release
         }
         debug {
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             ndk {
                 abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
             }
@@ -149,4 +151,7 @@ flutter {
 dependencies {
     implementation "androidx.activity:activity-ktx:1.10.1"
     implementation 'androidx.documentfile:documentfile:1.0.1'
+    // 图像上色原生核心：OpenCV（图像预处理/后处理）+ ONNX Runtime（模型推理）
+    implementation 'org.opencv:opencv:4.11.0'
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.23.0'
 }

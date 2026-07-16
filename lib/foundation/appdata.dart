@@ -231,6 +231,8 @@ class Settings with ChangeNotifier {
     'anime4KScaleFactor': 2.0, // upscale factor (1.0 - 4.0)
     'anime4KPushStrength': 0.31, // line refinement strength (0.0 - 1.0)
     'anime4KPushGradStrength': 1.0, // gradient refinement strength (0.0 - 1.0)
+    'enableColorization': false, // enable image colorization
+    'colorizationIntensity': 1.0, // colorization intensity (0.3 - 1.2)
   };
 
   operator [](String key) {

@@ -30,11 +30,22 @@ jobs:
       - name: Enable Linux support
         run: flutter config --enable-linux-desktop
         
+      - name: Run tests
+        run: flutter test test/anime4k_test.dart
+
       - name: Build Linux
         run: flutter build linux --release
+
+      # 新增打包步骤（原先裸上传 bundle/ 目录）
+      - name: Package Linux Build
+        run: |
+          VERSION=$(grep "^version:" pubspec.yaml | head -1 | sed 's/version: //' | cut -d+ -f1)
+          ZIP_NAME="Venera-Linux-v$VERSION.zip"
+          cd build/linux/x64/release
+          zip -r "../../$ZIP_NAME" bundle/
         
       - name: Upload Linux Build
         uses: actions/upload-artifact@v4
         with:
           name: app-release-linux
-          path: build/linux/x64/release/bundle/
+          path: build/linux/x64/release/*.zip

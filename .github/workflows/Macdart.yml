@@ -25,9 +25,17 @@ jobs:
         
       - name: Build macOS
         run: flutter build macos --release
+
+      # 新增打包步骤（原先裸上传 Venera.app/ 目录）
+      - name: Package macOS Build
+        run: |
+          VERSION=$(grep "^version:" pubspec.yaml | head -1 | sed 's/version: //' | cut -d+ -f1)
+          ZIP_NAME="Venera-macOS-v$VERSION.zip"
+          cd build/macos/Build/Products/Release
+          zip -r "$ZIP_NAME" *.app
         
       - name: Upload macOS Build
         uses: actions/upload-artifact@v4
         with:
           name: app-release-macos
-          path: build/macos/Build/Products/Release/
+          path: build/macos/Build/Products/Release/*.zip

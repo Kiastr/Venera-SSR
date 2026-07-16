@@ -8,6 +8,8 @@ class _SwitchSetting extends StatefulWidget {
     this.subtitle,
     this.comicId,
     this.comicSource,
+    this.titleStyle,
+    this.beforeChange,
   });
 
   final String title;
@@ -21,6 +23,11 @@ class _SwitchSetting extends StatefulWidget {
   final String? comicId;
 
   final String? comicSource;
+
+  final TextStyle? titleStyle;
+
+  /// 在开关状态真正改变前调用，返回 false 则取消切换
+  final Future<bool> Function(bool newValue)? beforeChange;
 
   @override
   State<_SwitchSetting> createState() => _SwitchSettingState();
@@ -40,20 +47,24 @@ class _SwitchSettingState extends State<_SwitchSetting> {
     assert(value is bool);
 
     return ListTile(
-      title: Text(widget.title),
+      title: Text(widget.title, style: widget.titleStyle),
       subtitle: widget.subtitle == null ? null : Text(widget.subtitle!),
       trailing: Switch(
         value: value,
-        onChanged: (value) {
+        onChanged: (newValue) async {
+          if (widget.beforeChange != null) {
+            final allow = await widget.beforeChange!(newValue);
+            if (!allow) return;
+          }
           setState(() {
             if (widget.comicId == null) {
-              appdata.settings[widget.settingKey] = value;
+              appdata.settings[widget.settingKey] = newValue;
             } else {
               appdata.settings.setReaderSetting(
                 widget.comicId!,
                 widget.comicSource!,
                 widget.settingKey,
-                value,
+                newValue,
               );
             }
           });

@@ -37,9 +37,12 @@ class Anime4KUpscaler {
   static Future<Uint8List?> processInIsolate(Anime4KParams params) async {
     try {
       return await compute(_processImage, params);
-    } catch (e) {
-      debugPrint('Anime4K processing error: $e');
-      return null;
+    } catch (e, s) {
+      debugPrint('Anime4K processing error: $e\n$s');
+      // Fallback: process in the current isolate so that transient isolate
+      // failures (e.g. on constrained CI runners) do not silently disable
+      // the feature.
+      return _processImage(params);
     }
   }
 
@@ -53,13 +56,22 @@ class Anime4KUpscaler {
       );
 
       final srcImage = img.decodeImage(params.imageBytes);
-      if (srcImage == null) return null;
+      if (srcImage == null) {
+        debugPrint('Anime4K: failed to decode image bytes');
+        return null;
+      }
 
       final result = upscaler.upscale(srcImage);
       return Uint8List.fromList(img.encodePng(result));
-    } catch (e) {
+    } catch (e, s) {
+      debugPrint('Anime4K upscale error: $e\n$s');
       return null;
     }
+  }
+
+  /// 直接在当前 Isolate 中处理图像（用于测试或作为 compute 失败时的回退）
+  static Uint8List? processDirect(Anime4KParams params) {
+    return _processImage(params);
   }
 
   /// 对图像执行 Anime4K 超分处理
