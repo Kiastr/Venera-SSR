@@ -83,7 +83,7 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
       }
     } catch (e) {
       if (mounted) {
-        context.showMessage(message: "Download failed: $e".tl);
+        context.showMessage(message: "Download failed: @e".tlParams({'e': e.toString()}));
       }
     } finally {
       _isDownloading = false;
@@ -157,7 +157,7 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
       } catch (e) {
         // 拷贝失败：还原备份
         if (await File(bakPath).exists()) await File(bakPath).rename(targetPath);
-        if (mounted) context.showMessage(message: "Failed to copy file: $e".tl);
+        if (mounted) context.showMessage(message: "Failed to copy file: @e".tlParams({'e': e.toString()}));
         return;
       }
 
@@ -178,7 +178,7 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
       await _refreshModelStatus();
       if (mounted) context.showMessage(message: "Custom model selected".tl);
     } catch (e) {
-      if (mounted) context.showMessage(message: "Failed to pick file: $e".tl);
+      if (mounted) context.showMessage(message: "Failed to pick file: @e".tlParams({'e': e.toString()}));
     }
   }
 

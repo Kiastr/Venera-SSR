@@ -42,7 +42,7 @@ jobs:
           VERSION=$(grep "^version:" pubspec.yaml | head -1 | sed 's/version: //' | cut -d+ -f1)
           ZIP_NAME="Venera-Linux-v$VERSION.zip"
           cd build/linux/x64/release
-          zip -r "../../$ZIP_NAME" bundle/
+          zip -r "$ZIP_NAME" bundle/
         
       - name: Upload Linux Build
         uses: actions/upload-artifact@v4
