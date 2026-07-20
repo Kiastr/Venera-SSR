@@ -12,7 +12,7 @@ on:
       - "Build Linux"
       - "Build macOS"
       - "Build iOS"
-    branches: [main, master, feature/colorization]
+    branches: [master]
     types: [completed]
 
 permissions:

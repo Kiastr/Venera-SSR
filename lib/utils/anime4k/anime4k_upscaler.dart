@@ -16,6 +16,10 @@ import 'package:image/image.dart' as img;
 /// 4. 计算 Sobel 梯度
 /// 5. 梯度精炼（Gradient Refine）：利用梯度信息将像素推向边缘
 class Anime4KUpscaler {
+  /// 边缘保护阈值 (0-255)：Sobel 梯度幅值高于此值的像素视为"清晰边/细线"，
+  /// Unblur 步骤会跳过它们，避免把漫画细线/排线侵蚀掉（核心质量修复）。
+  static const int _kEdgeProtectThreshold = 100;
+
   /// 推送强度 (0.0 - 1.0)，控制像素推送力度
   final double pushStrength;
 
@@ -114,6 +118,9 @@ class Anime4KUpscaler {
     // 步骤2: 计算亮度
     _computeLuminance(colorData, lumData, size);
 
+    // 步骤2.5: 计算边缘掩码（Sobel 梯度幅值），用于保护清晰边/细线不被 Unblur 侵蚀
+    final Uint8List edgeMask = _computeEdgeMask(lumData, width, height);
+
     // 步骤3: 线条细化 (Unblur)
     final int unblurStrength = (pushStrength * 255).round().clamp(0, 0xFFFF);
     int remaining = unblurStrength;
@@ -123,10 +130,10 @@ class Anime4KUpscaler {
       final int current = remaining.clamp(0, 255);
       if (forward) {
         _unblur(colorData, lumData, tempColorData, tempLumData, width, height,
-            current);
+            current, edgeMask);
       } else {
         _unblur(tempColorData, tempLumData, colorData, lumData, width, height,
-            current);
+            current, edgeMask);
       }
       forward = !forward;
       remaining -= current;
@@ -203,7 +210,44 @@ class Anime4KUpscaler {
     }
   }
 
+  /// 计算 Sobel 梯度幅值掩码（0-255），用于在 Unblur 前识别清晰边/细线。
+  /// 梯度越高的像素越可能是线条或锐边，应被保护以免被 Unblur 侵蚀。
+  Uint8List _computeEdgeMask(Uint8List lumData, int width, int height) {
+    final Uint8List mask = Uint8List(width * height);
+    for (int y = 0; y < height; y++) {
+      final int yn = y == 0 ? 0 : -width;
+      final int yp = y == height - 1 ? 0 : width;
+      for (int x = 0; x < width; x++) {
+        final int id = y * width + x;
+        final int xn = x == 0 ? 0 : -1;
+        final int xp = x == width - 1 ? 0 : 1;
+
+        final int tl = lumData[id + yn + xn];
+        final int t = lumData[id + yn];
+        final int tr = lumData[id + yn + xp];
+        final int l = lumData[id + xn];
+        final int r = lumData[id + xp];
+        final int bl = lumData[id + yp + xn];
+        final int b = lumData[id + yp];
+        final int br = lumData[id + yp + xp];
+
+        final int xSobel =
+            (-tl + tr - l - l + r + r - bl + br).abs();
+        final int ySobel =
+            (-tl - t - t - tr + bl + b + b + br).abs();
+        mask[id] = math
+            .sqrt(xSobel * xSobel + ySobel * ySobel)
+            .round()
+            .clamp(0, 255);
+      }
+    }
+    return mask;
+  }
+
   /// 线条细化 (Unblur) - 将暗像素推向亮区域
+  ///
+  /// [edgeMask] Sobel 梯度幅值掩码（0-255）。梯度高于 [_kEdgeProtectThreshold]
+  /// 的像素（清晰边/细线）直接原样保留，避免 Unblur 把漫画细线侵蚀掉。
   void _unblur(
     Int32List srcColor,
     Uint8List srcLum,
@@ -212,6 +256,7 @@ class Anime4KUpscaler {
     int width,
     int height,
     int strength,
+    Uint8List edgeMask,
   ) {
     strength = strength.clamp(0, 255);
 
@@ -221,6 +266,14 @@ class Anime4KUpscaler {
 
       for (int x = 0; x < width; x++) {
         final int id = y * width + x;
+
+        // 边缘保护：清晰边/细线（高梯度）原样保留，防止细线被侵蚀
+        if (edgeMask[id] >= _kEdgeProtectThreshold) {
+          dstColor[id] = srcColor[id];
+          dstLum[id] = srcLum[id];
+          continue;
+        }
+
         final int xn = x == 0 ? 0 : -1;
         final int xp = x == width - 1 ? 0 : 1;
 

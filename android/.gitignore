@@ -12,3 +12,7 @@ key.properties
 **/*.keystore
 **/*.jks
 /app/.cxx/
+
+# 固定 CI 签名用的 debug keystore：内测/调试包共用同一把密钥，
+# 避免每次 CI 现生成随机密钥导致覆盖安装报“签名不一致”。仅调试用途，密码为公开默认值。
+!app/debug_ci.keystore

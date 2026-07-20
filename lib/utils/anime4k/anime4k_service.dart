@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -52,9 +54,13 @@ class Anime4KService {
   }
 
   /// 获取缓存文件路径
+  ///
+  /// 使用 key 的 SHA-256 作为文件名，避免 [String.hashCode] 哈希碰撞导致
+  /// 不同图片命中彼此的缓存（显示错图）。
   String? _getCachePath(String key) {
     if (_cacheDir == null) return null;
-    return path.join(_cacheDir!, '${key.hashCode.abs()}.png');
+    final hash = sha256.convert(utf8.encode(key)).toString();
+    return path.join(_cacheDir!, '$hash.png');
   }
 
   /// 检查是否有缓存，有则返回缓存数据

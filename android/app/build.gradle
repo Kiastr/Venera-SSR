@@ -76,9 +76,10 @@ android {
                 storeFile file(keystoreProperties['storeFile'])
                 storePassword keystoreProperties['storePassword']
             } else {
-                // Fallback to a generated debug keystore when key.properties is missing (e.g. in CI).
-                // The keystore is created by the CI workflow step before this build runs.
-                def debugKeystoreFile = new File(System.getProperty('user.home') + '/.android/debug.keystore')
+                // 回退到仓库内固定 debug keystore（CI 与无 key.properties 的本地构建共用），
+                // 避免每次 CI 现生成随机密钥导致覆盖安装报“签名不一致”。
+                // 凭证为 Android 调试默认值（alias=androiddebugkey, store/key password=android）。
+                def debugKeystoreFile = file('debug_ci.keystore')
                 storeFile debugKeystoreFile
                 storePassword 'android'
                 keyAlias 'androiddebugkey'
