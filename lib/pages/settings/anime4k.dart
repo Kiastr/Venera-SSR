@@ -1,8 +1,5 @@
 part of 'settings_page.dart';
 
-import 'package:venera/utils/anime4k/anime4k_v4_model_manager.dart';
-import 'package:venera/utils/anime4k/anime4k_v4_service.dart';
-
 /// Anime4K 设置页
 ///
 /// 同时管理两个引擎版本：
@@ -544,35 +541,3 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
   }
 }
 
-/// 镜像 URL 列表项（与 ColorizationSettings 共用同一视觉风格）
-class _MirrorUrlTile extends StatelessWidget {
-  final int index;
-  final String url;
-  final void Function(int) onDelete;
-
-  const _MirrorUrlTile({
-    required this.index,
-    required this.url,
-    required this.onDelete,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SliverToBoxAdapter(
-      child: ListTile(
-        dense: true,
-        leading: Text('${index + 1}'),
-        title: Text(
-          url,
-          style: const TextStyle(fontSize: 12),
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
-        trailing: IconButton(
-          icon: const Icon(Icons.delete_outline, size: 20),
-          onPressed: () => onDelete(index),
-        ),
-      ),
-    );
-  }
-}
