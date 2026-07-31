@@ -1,2 +1,6 @@
 *.onnx filter=lfs diff=lfs merge=lfs -text
 *.tflite filter=lfs diff=lfs merge=lfs -text
+# 例外：打包进 APK 的超分模型（~2.5MB）作为普通 git blob 存储，不走 LFS。
+# 原因：CI 的 actions/checkout 默认不拉取 LFS（lfs: false），若走 LFS 会在构建时
+# 得到指针文件而非真实模型，导致打包进 APK 的 asset 损坏。此文件体积小，直接入库最稳。
+assets/models/realesr_animevideov3.onnx !filter !diff !merge text=false

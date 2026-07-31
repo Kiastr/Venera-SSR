@@ -1,16 +1,21 @@
 import 'dart:io';
 
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
 
-/// v4 超分模型管理器：负责从网络下载 Real-ESRGAN(animevideov3) ONNX 模型到应用目录。
+/// v4 超分模型管理器：管理 Real-ESRGAN(animevideov3) ONNX 模型（~4MB）的生命周期。
 ///
-/// 设计严格对齐 [ColorizationModelManager]：
-///  - 不使用 Flutter assets 打包模型（~4MB 虽小，但保持与 DeOldify 一致的“运行时下载”策略，
-///    也便于后续替换/升级模型而不发版）。
+/// 模型获取策略（三选一，优先级从高到低）：
+///  1. 自选外部模型（用户从本地导入，最高优先，绝不被覆盖）；
+///  2. 打包进 APK 的内置模型（首次运行经 [extractBundledModelIfNeeded] 抽取到应用目录，
+///     开箱即用、无需联网）；
+///  3. 运行时下载（下载管理器保留：用户删除内置模型后可重新下载，或切换镜像/自选模型）。
+///
+/// 其他约定：
 ///  - 通过 [ColorizationService] 复用的 [com.github.kiastr.venera_ssr/colorize] MethodChannel
 ///    的 `copyUri` 方法完成“自选本地模型”的拷贝（不额外新增原生方法）。
 ///  - 模型调用位置固定为 [getApplicationSupportDirectory]/realesr_animevideov3.onnx，
@@ -29,9 +34,15 @@ class Anime4KV4ModelManager {
   /// 自选外部模型的原始文件名（仅用于 UI 展示）
   static const String _customModelNameKey = 'anime4kV4_custom_model_name';
 
+  /// 打包进 APK 的模型在 assets 中的路径（需同步在 pubspec.yaml 的 assets: 中声明）。
+  static const String _bundledAssetPath = 'assets/models/realesr_animevideov3.onnx';
+
+  /// 标记“打包模型已抽取到应用目录”，确保仅抽取一次；用户手动删除后不自动回灌。
+  static const String _bundledInstalledKey = 'anime4kV4_bundled_installed';
+
   static const List<String> _defaultModelUrls = [
-    'https://ghproxy.net/https://github.com/Kiastr/AiColorize/releases/download/models/realesr-animevideov3.onnx',
-    'https://github.com/Kiastr/AiColorize/releases/download/models/realesr-animevideov3.onnx',
+    'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_animevideov3.onnx',
+    'https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_animevideov3.onnx',
   ];
 
   static List<String> _modelUrls = [];
@@ -129,6 +140,69 @@ class Anime4KV4ModelManager {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_customModelActiveKey, true);
     await prefs.setString(_customModelNameKey, displayName);
+  }
+
+  /// 把打包进 APK 的模型（assets）抽取到应用目录（模型调用位置），仅在需要时执行一次。
+  ///
+  /// 触发条件（全部满足才回灌）：
+  ///  1. 未启用“自选外部模型”（用户自选优先，绝不覆盖）；
+  ///  2. 模型调用位置当前没有有效文件（不存在或体积 < 下限）；
+  ///  3. 尚未标记为“打包模型已安装”——用户手动删除后不自动回灌，尊重用户意愿。
+  ///
+  /// assets 中缺少该模型（例如尚未打包）时静默跳过，让下载管理器接管，保证 APK 始终可构建。
+  static Future<void> extractBundledModelIfNeeded() async {
+    try {
+      // 用户自选外部模型时不覆盖
+      if (await isCustomModelActive()) return;
+
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool(_bundledInstalledKey) ?? false) {
+        // 已抽取过一次；若用户随后手动删除，不再自动回灌
+        return;
+      }
+
+      final dir = await getApplicationSupportDirectory();
+      final targetPath = path.join(dir.path, modelFileName);
+      final targetFile = File(targetPath);
+
+      // 已有有效模型（下载/导入）则无需抽取，直接标记完成
+      if (await targetFile.exists() &&
+          await targetFile.length() > _validModelMinSize) {
+        await prefs.setBool(_bundledInstalledKey, true);
+        return;
+      }
+
+      // 从 assets 读取打包模型；不存在（未打包）则静默跳过
+      final ByteData data;
+      try {
+        data = await rootBundle.load(_bundledAssetPath);
+      } catch (_) {
+        // assets 未包含该模型：交给下载管理器，保持可构建/可降级
+        return;
+      }
+
+      final bytes = data.buffer.asUint8List(
+        data.offsetInBytes,
+        data.lengthInBytes,
+      );
+      if (bytes.length <= _validModelMinSize) {
+        // 打包文件异常（过小），不写入，交给下载流程
+        return;
+      }
+
+      // 原子写入：先写临时文件再重命名，避免中断产生半截文件
+      final tmpPath = '$targetPath.bundle.tmp';
+      final tmpFile = File(tmpPath);
+      await tmpFile.writeAsBytes(bytes, flush: true);
+      await tmpFile.rename(targetPath);
+
+      await prefs.setBool(_bundledInstalledKey, true);
+      _cachedModelPath = targetPath;
+      Log.info('Anime4KV4',
+          'bundled model extracted to $targetPath (${bytes.length} bytes)');
+    } catch (e, s) {
+      Log.error('Anime4KV4', 'extractBundledModelIfNeeded failed: $e\n$s');
+    }
   }
 
   /// 获取模型文件路径（即模型调用位置）。不自动下载；文件不存在或无效则返回 null。
