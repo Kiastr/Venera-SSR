@@ -13,9 +13,10 @@ import org.opencv.imgproc.Imgproc
 import java.util.Collections
 
 /**
- * 上色计算核心。两个函数严格 1:1 对齐桌面版 colorize.py（已由 Python 参考实现验证）：
+ * 上色/超分计算核心。三个函数严格对齐参考实现：
  *  - DeOldify 输入值域 0–255（不归一化），输出完整 BGR
  *  - DDColor  输入值域 0–1（/255），输出仅 ab 两通道，需与原图 L 拼接
+ *  - ESRGAN   输入值域 0–1（/255），输出完整 RGB [1,3,4H,4W]，固定 4x
  *  - OpenCV float-LAB 真实范围 L∈[0,100]、a,b∈[−128,127]，必须用 OpenCV 转换
  *
  * 移植自 AiColorize（com.kiastr.aicolorize.ColorizeEngine），经真机模型端到端验证。
@@ -26,7 +27,7 @@ class ColorizeEngine {
     private val modelManager = ModelManager(env)
 
     /**
-     * 单次上色：输入已解码的 Bitmap，返回上色后的 Bitmap。
+     * 单次处理：输入已解码的 Bitmap，返回处理后的 Bitmap。
      * 不负责输入 Bitmap 的回收（由调用方持有），仅回收内部 Mat 与输出 Bitmap 之外的中间对象。
      */
     fun colorize(
@@ -47,10 +48,10 @@ class ColorizeEngine {
             throw IllegalArgumentException("图片尺寸无效: ${working.width}x${working.height}")
         }
         val session = modelManager.getSession(modelPath, useNnapi)
-        val out = if (type == "ddcolor") {
-            colorizeDdcolor(working, session, intensity)
-        } else {
-            colorizeDeoldify(working, session, intensity)
+        val out = when (type) {
+            "ddcolor" -> colorizeDdcolor(working, session, intensity)
+            "esrgan" -> colorizeEsrgan(working, session, intensity)
+            else -> colorizeDeoldify(working, session, intensity)
         }
         if (needsRecycle) working.recycle()
         return out
@@ -264,6 +265,66 @@ class ColorizeEngine {
         grayLab.release()
         grayRgb.release()
         imgL.release()
+        return outBitmap
+    }
+
+    // ----------------------------------------------------------------
+    // ESRGAN (Real-ESRGAN animevideov3)：输入 0–1，固定 4x 输出完整 RGB
+    // 对应 realesrgan 官方推理（img/255 -> RGB -> NCHW -> 推理 -> NCHW -> RGB -> *255）
+    //  - 不归一化到 ImageNet 均值（animevideov3 仅 /255）
+    //  - intensity 围绕中性灰 0.5 做对比缩放（默认 1.0 = 不变）
+    // ----------------------------------------------------------------
+    private fun colorizeEsrgan(inputBitmap: Bitmap, session: OrtSession, intensity: Float): Bitmap {
+        val bgr = ImageUtils.bitmapToBgrMat(inputBitmap) // (H,W,3) BGR uint8
+        val h = bgr.height()
+        val w = bgr.width()
+        val outH = h * 4
+        val outW = w * 4
+
+        // BGR -> RGB（模型以 RGB 训练）
+        val rgb = Mat()
+        Imgproc.cvtColor(bgr, rgb, Imgproc.COLOR_BGR2RGB)
+        // -> float32 0–1（/255，关键：animevideov3 仅归一化到 [0,1]）
+        val rgbF = Mat()
+        rgb.convertTo(rgbF, CvType.CV_32F, 1.0 / 255.0)
+
+        // NCHW [1,3,H,W] 0–1
+        val buf = ImageUtils.hwcToNchwFloatBuffer(rgbF)
+        val inputName = session.inputNames.iterator().next()
+        val tensor = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, h.toLong(), w.toLong()))
+        val results = session.run(Collections.singletonMap(inputName, tensor))
+        // Result.get(int) 直接取 OnnxValue（避免 Optional 转型异常）
+        val outBuf = (results.get(0) as OnnxTensor).floatBuffer // (1,3,4H,4W) NCHW RGB 0–1
+        val outRgb = ImageUtils.nchwToHwcMat(outBuf, 3, outH, outW) // (4H,4W,3) RGB float 0–1
+        tensor.close()
+        results.close()
+
+        // intensity：围绕 0.5 做对比缩放（默认 1.0 = 不变），在 float 空间计算避免截断误差
+        if (intensity != 1.0f) {
+            val half = Mat(outRgb.size(), outRgb.type(), Scalar(0.5))
+            val centered = Mat()
+            Core.subtract(outRgb, half, centered)
+            Core.multiply(centered, Scalar(intensity.toDouble()), centered)
+            Core.add(centered, half, outRgb)
+            centered.release()
+            half.release()
+        }
+
+        // *255 -> uint8（cvRound + 饱和截断 = clip[0,255]）
+        val outRgbU8 = Mat()
+        outRgb.convertTo(outRgbU8, CvType.CV_8U)
+        outRgb.release()
+
+        // RGB -> BGR（bgrMatToBitmap 内部再做 BGR2RGBA）
+        val outBgr = Mat()
+        Imgproc.cvtColor(outRgbU8, outBgr, Imgproc.COLOR_RGB2BGR)
+        outRgbU8.release()
+
+        val outBitmap = ImageUtils.bgrMatToBitmap(outBgr) // 内部 BGR2RGBA
+        outBgr.release()
+        bgr.release()
+        rgb.release()
+        rgbF.release()
         return outBitmap
     }
 

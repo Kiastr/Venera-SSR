@@ -9,7 +9,9 @@ import 'package:venera/foundation/log.dart';
 import 'base_image_provider.dart';
 import 'reader_image.dart' as image_provider;
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/app.dart';
 import 'package:venera/utils/anime4k/anime4k_service.dart';
+import 'package:venera/utils/anime4k/anime4k_v4_service.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
 
 class ReaderImageProvider
@@ -121,32 +123,57 @@ class ReaderImageProvider
     // ===== Anime4K 超分处理 =====
     // 在 ImageProvider.load 阶段处理图片字节，与自定义图片处理相同位置，
     // 确保无论阅读器用什么 widget 渲染都会生效。
+    // v1（纯 Dart CPU 算法）与 v4（ONNX Runtime + NNAPI GPU，AI 模型）并存，
+    // 由 anime4KVersion 选择引擎；v4 仅 Android 生效，否则自动回退 v1。
+    final anime4KVersion = appdata.settings.getReaderSetting(
+          cid, sourceKey ?? "", 'anime4KVersion') ??
+        'v1';
     final enableAnime4K = appdata.settings.getReaderSetting(
           cid, sourceKey ?? "", 'enableAnime4K') ==
         true;
     if (enableAnime4K) {
-      try {
-        final result = await Anime4KService.instance.processImage(
-          imageBytes: bytes,
-          cacheKey: key,
-          scaleFactor: (appdata.settings.getReaderSetting(
-                    cid, sourceKey ?? "", 'anime4KScaleFactor') as num?)
-                ?.toDouble() ??
-              2.0,
-          pushStrength: (appdata.settings.getReaderSetting(
-                    cid, sourceKey ?? "", 'anime4KPushStrength') as num?)
-                ?.toDouble() ??
-              0.31,
-          pushGradStrength: (appdata.settings.getReaderSetting(
-                    cid, sourceKey ?? "", 'anime4KPushGradStrength') as num?)
-                ?.toDouble() ??
-              1.0,
-        );
-        if (result != null) {
-          bytes = result;
+      if (anime4KVersion == 'v4' &&
+          App.isAndroid &&
+          Anime4KV4Service.instance.isAvailable) {
+        try {
+          final result = await Anime4KV4Service.instance.processImage(
+            imageBytes: bytes,
+            cacheKey: key,
+            intensity: (appdata.settings.getReaderSetting(
+                      cid, sourceKey ?? "", 'anime4KV4Intensity') as num?)
+                    ?.toDouble() ??
+                1.0,
+          );
+          if (result != null) {
+            bytes = result;
+          }
+        } catch (e, s) {
+          Log.error('ReaderImage', 'Anime4K v4 processing error: $e', s);
         }
-      } catch (e, s) {
-        Log.error('ReaderImage', 'Anime4K processing error: $e', s);
+      } else {
+        try {
+          final result = await Anime4KService.instance.processImage(
+            imageBytes: bytes,
+            cacheKey: key,
+            scaleFactor: (appdata.settings.getReaderSetting(
+                      cid, sourceKey ?? "", 'anime4KScaleFactor') as num?)
+                  ?.toDouble() ??
+              2.0,
+            pushStrength: (appdata.settings.getReaderSetting(
+                      cid, sourceKey ?? "", 'anime4KPushStrength') as num?)
+                  ?.toDouble() ??
+              0.31,
+            pushGradStrength: (appdata.settings.getReaderSetting(
+                      cid, sourceKey ?? "", 'anime4KPushGradStrength') as num?)
+                  ?.toDouble() ??
+              1.0,
+          );
+          if (result != null) {
+            bytes = result;
+          }
+        } catch (e, s) {
+          Log.error('ReaderImage', 'Anime4K processing error: $e', s);
+        }
       }
     }
 
