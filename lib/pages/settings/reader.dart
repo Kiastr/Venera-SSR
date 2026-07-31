@@ -167,6 +167,22 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           comicId: isEnabledSpecificSettings ? widget.comicId : null,
           comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
         ).toSliver(),
+        SelectSetting(
+          title: "Anime4K Version".tl,
+          subtitle: "v4 requires model download (Android only)".tl,
+          settingKey: "anime4KVersion",
+          optionTranslation: {
+            "v1": "v1 (CPU)".tl,
+            "v4": "v4 (AI · GPU)".tl,
+          },
+          onChanged: () {
+            PaintingBinding.instance.imageCache.clear();
+            ComicImage.clear();
+            widget.onChanged?.call("anime4KVersion");
+          },
+          comicId: isEnabledSpecificSettings ? widget.comicId : null,
+          comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+        ).toSliver(),
         _SwitchSetting(
           title: "Enable Colorization(AI上色)".tl,
           titleStyle: TextStyle(

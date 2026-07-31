@@ -16,6 +16,7 @@ import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/utils/app_links.dart';
 import 'package:venera/utils/handle_text_share.dart';
 import 'package:venera/utils/anime4k/anime4k_service.dart';
+import 'package:venera/utils/anime4k/anime4k_v4_service.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
 import 'package:venera/utils/translation/translation_service.dart';
 import 'package:venera/utils/opencc.dart';
@@ -50,6 +51,7 @@ Future<void> init() async {
       ComicSourceManager().init().wait(),
       OpenCC.init(),
       Anime4KService.instance.init().wait(),
+      Anime4KV4Service.instance.init().wait(),
       ColorizationService.instance.init().wait(),
       TranslationService.instance.init().wait(),
     ];
