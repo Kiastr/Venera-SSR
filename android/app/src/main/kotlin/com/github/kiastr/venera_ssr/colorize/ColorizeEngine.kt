@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
+import org.opencv.core.MatOfDouble
 import org.opencv.core.Rect
 import org.opencv.core.Scalar
 import org.opencv.core.Size
@@ -359,7 +360,7 @@ class ColorizeEngine {
         // 全图 uint8 输出（native 内存，不占 ART 堆）
         val outRgbU8 = Mat.zeros(outH, outW, CvType.CV_8UC(3))
         val inputName = session.inputNames.iterator().next()
-        var firstTile = true
+        var selfChecked = false
 
         var y = 0
         while (y < h) {
@@ -400,43 +401,56 @@ class ColorizeEngine {
                 tensor.close()
                 results.close()
 
-                // 后端健全性自检（仅 NNAPI 首 tile 开启，cpuRef 即 CPU 参考会话）
-                if (cpuRef != null && firstTile) {
-                    val inMean = Core.mean(tile).`val`.let { (it[0] + it[1] + it[2]) / 3.0 }
-                    val outMean = Core.mean(outTileRgb).`val`.let { (it[0] + it[1] + it[2]) / 3.0 }
-                    // 1) 全黑：输入非黑但输出全黑 => 后端异常（原自检逻辑保留）
-                    if (inMean > 0.05 && outMean < 0.01) {
-                        outTileRgb.release()
-                        tile.release()
-                        outRgbU8.release()
-                        return null
-                    }
-                    // 2) 偏色：与 CPU 参考 tile 比对，逐通道 MAE 超阈值即判定后端返回了错误颜色
-                    //    （典型如整体偏红）。NNAPI 在部分设备上仅做 fp16 近似，正常数值误差远小于阈值；
-                    //    真偏色（通道错位/染色）的 MAE 通常在 0.1+，阈值取 0.04（≈10/255）留足余量。
-                    try {
-                        val refBuf = ImageUtils.hwcToNchwFloatBuffer(tile)
-                        val refTensor = OnnxTensor.createTensor(
-                            env, refBuf, longArrayOf(1, 3, tileIn.toLong(), tileIn.toLong())
-                        )
-                        val refRes = cpuRef.run(Collections.singletonMap(inputName, refTensor))
-                        val refOut = (refRes.get(0) as OnnxTensor).floatBuffer
-                        val refTileRgb = ImageUtils.nchwToHwcMat(refOut, 3, tileIn * scale, tileIn * scale)
-                        refTensor.close()
-                        refRes.close()
-                        val mae = maxChannelMae(outTileRgb, refTileRgb)
-                        refTileRgb.release()
-                        if (mae > NNAPI_COLOR_TOL) {
+                // 后端健全性自检（仅 NNAPI，cpuRef 即 CPU 参考会话）
+                // 关键修正：旧逻辑只在“首个 tile”比对，而阅读器首 tile 常是黑边，
+                // NNAPI 对全黑输入也输出近黑，MAE≈0，自检被蒙混通过。改为在“首个含内容
+                // tile”上比对，且偏色比对排除近白像素（白底被 clip 在 1.0 看不出红偏，
+                // 暗部/墨线最明显），彻底消除白底稀释导致的漏检。
+                if (cpuRef != null && !selfChecked) {
+                    // 该 tile 是否含内容（三通道标准差之和 > 阈值，排除纯黑/纯白边框）
+                    val std = MatOfDouble(); val meanTmp = MatOfDouble()
+                    Core.meanStdDev(tile, meanTmp, std)
+                    var sumStd = 0.0
+                    for (i in 0 until std.rows()) for (j in 0 until std.cols()) sumStd += std.get(i, j)[0]
+                    val hasContent = sumStd > 0.02
+                    if (hasContent) {
+                        val inMean = Core.mean(tile).`val`.let { (it[0] + it[1] + it[2]) / 3.0 }
+                        val outMean = Core.mean(outTileRgb).`val`.let { (it[0] + it[1] + it[2]) / 3.0 }
+                        // 1) 全黑：输入非黑但输出全黑 => 后端异常（原自检逻辑保留）
+                        if (inMean > 0.05 && outMean < 0.01) {
                             outTileRgb.release()
                             tile.release()
                             outRgbU8.release()
                             return null
                         }
-                    } catch (_: Exception) {
-                        // 参考比对异常则不阻断 NNAPI（退化为仅"全黑"自检）
+                        // 2) 偏色：与 CPU 参考 tile 在“非近白像素”上比对，逐通道 MAE 超阈值即
+                        //    判定后端返回了错误颜色（典型如整体偏红）。NNAPI 在部分设备上仅做
+                        //    fp16 近似，正常数值误差远小于阈值；真偏色 MAE 通常在 0.1+，
+                        //    阈值取 0.04（≈10/255）留足余量。非近白像素排除后，白底稀释不再漏检。
+                        try {
+                            val refBuf = ImageUtils.hwcToNchwFloatBuffer(tile)
+                            val refTensor = OnnxTensor.createTensor(
+                                env, refBuf, longArrayOf(1, 3, tileIn.toLong(), tileIn.toLong())
+                            )
+                            val refRes = cpuRef.run(Collections.singletonMap(inputName, refTensor))
+                            val refOut = (refRes.get(0) as OnnxTensor).floatBuffer
+                            val refTileRgb = ImageUtils.nchwToHwcMat(refOut, 3, tileIn * scale, tileIn * scale)
+                            refTensor.close()
+                            refRes.close()
+                            val mae = maxChannelMaeOnContent(outTileRgb, refTileRgb)
+                            refTileRgb.release()
+                            if (mae > NNAPI_COLOR_TOL) {
+                                outTileRgb.release()
+                                tile.release()
+                                outRgbU8.release()
+                                return null
+                            }
+                        } catch (_: Exception) {
+                            // 参考比对异常则不阻断 NNAPI（退化为仅“全黑”自检）
+                        }
+                        selfChecked = true
                     }
                 }
-                firstTile = false
                 tile.release()
 
                 // 核心区在 tile 内恒定从 (pad,pad) 起（已验证与 x/y 是否贴边无关）
@@ -475,13 +489,11 @@ class ColorizeEngine {
             y += coreH
         }
 
-        // 整图偏色自检（仅 NNAPI 路径，cpuRef != null）：首 tile 的逐通道 MAE 检查会被顶部
-        // 黑边蒙混（NNAPI 对全黑输入也输出近乎全黑，MAE≈0，漏检偏色），故改在全图推理完成
-        // 后做通道均值检查。真偏色表现为 R 通道独高、G≈B，R-G 均值远高于正常图；正常动漫
-        // 各色平均后 R≈G≈B，远小于阈值。命中即整图作废，由调用方切 CPU 重跑。
+        // 整图偏色兜底（仅 NNAPI 路径）：在“非近白像素”上统计 R-G 均值，避免白底把
+        // 整体偏色均值稀释到阈值以下而漏检。命中即整图作废，由调用方切 CPU 重跑。
         if (cpuRef != null) {
-            val m = Core.mean(outRgbU8).`val`
-            if (m[0] - m[1] > NNAPI_COLOR_TOL_RGB || m[0] - m[2] > NNAPI_COLOR_TOL_RGB) {
+            val bias = redShiftOnContent(outRgbU8)
+            if (bias > NNAPI_COLOR_TOL_RGB) {
                 outRgbU8.release()
                 return null
             }
@@ -503,15 +515,47 @@ class ColorizeEngine {
 
     /**
      * 两个 float HWC Mat 的逐通道 mean absolute error，取三通道中的最大值。
-     * 用于 NNAPI 输出与 CPU 参考的偏色比对：空间细节的 fp16 噪声会相互抵消，
-     * 但通道错位/染色的 MAE 会显著偏高。
+     * 仅在“非近白像素”（max(R,G,B) < 0.9）上统计，去除白底对偏色均值的稀释：
+     * 染红设备的红偏是加性偏移，白底被 clip 在 1.0 看不出，暗部/墨线最明显。
+     * 用于 NNAPI 输出与 CPU 参考的偏色比对。
      */
-    private fun maxChannelMae(a: Mat, b: Mat): Double {
+    private fun maxChannelMaeOnContent(a: Mat, b: Mat): Double {
+        val ch = ArrayList<Mat>(3)
+        Core.split(a, ch)
+        val m1 = Mat(); val maxc = Mat()
+        Core.max(ch[0], ch[1], m1); Core.max(m1, ch[2], maxc)
+        ch.forEach { it.release() }; m1.release()
+        val mask = Mat()
+        Core.compare(maxc, Scalar(0.9), mask, Core.CMP_LT) // 非近白像素
+        maxc.release()
+        val total = Core.countNonZero(mask)
+        if (total == 0) { mask.release(); return 0.0 } // 整 tile 近白，无法判定，视为通过
         val d = Mat()
         Core.absdiff(a, b, d)
-        val m = Core.mean(d).`val` // 三通道各自的 mean abs error
-        d.release()
+        val m = Core.mean(d, mask).`val`
+        d.release(); mask.release()
         return maxOf(m[0], m[1], m[2])
+    }
+
+    /**
+     * 整图“红偏”度量：在“非近白像素”上统计 mean(R - G)（uint8 空间 [0,255]）。
+     * 正常动漫各色平均后 R≈G≈B，偏色时 R 独高。排除白底以免稀释。
+     */
+    private fun redShiftOnContent(a: Mat): Double {
+        val ch = ArrayList<Mat>(3)
+        Core.split(a, ch)
+        val m1 = Mat(); val maxc = Mat()
+        Core.max(ch[0], ch[1], m1); Core.max(m1, ch[2], maxc)
+        val mask = Mat()
+        Core.compare(maxc, Scalar(230.0), mask, Core.CMP_LT) // 非近白像素（outRgbU8 为 uint8，阈值取 0.9*255）
+        m1.release(); maxc.release()
+        val rg = Mat()
+        Core.subtract(ch[0], ch[1], rg)
+        ch.forEach { it.release() }
+        val total = Core.countNonZero(mask)
+        val bias = if (total == 0) 0.0 else Core.mean(rg, mask).`val`[0]
+        rg.release(); mask.release()
+        return bias
     }
 
     /**
