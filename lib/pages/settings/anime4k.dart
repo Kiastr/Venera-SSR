@@ -331,8 +331,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
         SliverAnimatedVisibility(
           visible: isV4,
           child: _SliderSetting(
-            title: "Upscale Intensity".tl,
-            subtitle: "v4 only · 4x fixed".tl,
+            title: "Upscale Intensity (v4 · 4x fixed)".tl,
             settingsIndex: "anime4KV4Intensity",
             min: 0.3,
             max: 1.2,
