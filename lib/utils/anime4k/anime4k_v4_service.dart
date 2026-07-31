@@ -6,14 +6,16 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/log.dart';
 
 import 'anime4k_v4_model_manager.dart';
 
 /// Anime4K v4 超分服务（带模型版本）
 ///
-/// 基于 Real-ESRGAN(animevideov3) ONNX 模型，经原生（Kotlin + ONNX Runtime + NNAPI GPU）
-/// 完成超分辨率，固定 4x 放大。设计严格对齐 [ColorizationService]：
+/// 基于 Real-ESRGAN ONNX 模型（默认 4x animevideov3，可选 2x general-x2c），经原生
+/// （Kotlin + ONNX Runtime + NNAPI GPU）完成超分辨率，倍数由模型实际维度决定。
+/// 设计严格对齐 [ColorizationService]：
 ///  - 单例 + 缓存 + 任务队列；
 ///  - 通过 [com.github.kiastr.venera_ssr/colorize] MethodChannel 调用，
 ///    与原生 [ColorizeEngine.colorizeEsrgan] 对接（复用上色通道，无需新增原生方法）；
@@ -52,12 +54,28 @@ class Anime4KV4Service {
       if (!await cacheDirectory.exists()) {
         await cacheDirectory.create(recursive: true);
       }
-      // 首次运行把打包进 APK 的模型抽取到应用目录（若已下载/自选或用户已删除则跳过）
+      // 同步“当前选中模型”（默认 4x），再抽取内置模型/确认可用
+      await Anime4KV4ModelManager.setSelectedModelId(
+        (appdata.settings['anime4KV4Model'] as String?) ?? 'anime4k_x4',
+      );
       await Anime4KV4ModelManager.extractBundledModelIfNeeded();
       _modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
     } catch (e) {
       Log.error('Anime4KV4', 'init error: $e');
     }
+  }
+
+  /// 切换 v4 超分模型（4x/2x）。重置原生会话、重载模型路径、清空超分缓存
+  /// （不同倍数输出尺寸不同，缓存不可复用）。
+  Future<void> setModel(String id) async {
+    if (!Anime4KV4ModelManager.isValidModelId(id)) return;
+    await Anime4KV4ModelManager.setSelectedModelId(id);
+    appdata.settings['anime4KV4Model'] = id;
+    appdata.saveData();
+    await resetNativeSession();
+    await Anime4KV4ModelManager.extractBundledModelIfNeeded();
+    _modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
+    await clearCache();
   }
 
   /// 模型是否可用（已下载到本地且当前平台支持）
@@ -135,7 +153,7 @@ class Anime4KV4Service {
     }
   }
 
-  /// 处理图片字节数据，返回超分后的 PNG 字节数据（固定 4x）。
+  /// 处理图片字节数据，返回超分后的 PNG 字节数据（倍数由模型决定，2x/4x）。
   ///
   /// 模型缺失或非 Android 时直接返回 null（上层据此回退 v1 或保持原图）。
   Future<Uint8List?> processImage({
@@ -156,8 +174,9 @@ class Anime4KV4Service {
     final modelPath = _modelPath;
     if (modelPath == null) return null;
 
-    // v4 前缀 + intensity 避免与 v1 串图，且改强度后不返回旧缓存
-    final fullKey = 'v4_${cacheKey}_${intensity.toStringAsFixed(2)}';
+    // 前缀含模型 id（4x/2x 输出尺寸不同）+ intensity，避免串图与旧缓存复用
+    final fullKey =
+        'v4_${Anime4KV4ModelManager.selectedDef.id}_${cacheKey}_${intensity.toStringAsFixed(2)}';
 
     final cached = await _getFromCache(fullKey);
     if (cached != null) {

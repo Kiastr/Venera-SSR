@@ -12,43 +12,60 @@ import ai.onnxruntime.OrtSession
  */
 class ModelManager(private val env: OrtEnvironment) {
 
-    @Volatile
-    private var session: OrtSession? = null
-
-    @Volatile
+    // 只为「当前模型路径」缓存多个后端（key = "nnapi" / "cpu"）。
+    //
+    // 旧实现只持有单个 session，同一模型在 NNAPI↔CPU 间切换（超分先试 NNAPI、
+    // 失败回退 CPU）会反复 close + 重新加载 + 重编译计算图，表现为明显卡顿。
+    // 因此这里允许同一模型的多后端并存。
+    //
+    // 但缓存必须限定在单一模型路径内：DeOldify 完整版约 243MB，
+    // 若与超分模型的 session 同时长期驻留会显著抬高常驻内存。
+    // 模型路径变化时释放旧路径的全部 session（与旧实现的释放时机一致）。
     private var currentPath: String? = null
+    private val sessions = HashMap<String, OrtSession>()
 
-    @Volatile
-    private var currentUseNnapi: Boolean = false
+    private fun backendKey(useNnapi: Boolean) = if (useNnapi) "nnapi" else "cpu"
 
     @Synchronized
     fun getSession(modelPath: String, useNnapi: Boolean): OrtSession {
-        // 路径或执行后端变化时必须重建 session，否则 NNAPI→CPU 回退会复用旧 NNAPI session
-        if (session == null || currentPath != modelPath || currentUseNnapi != useNnapi) {
-            session?.close()
-            val opts = OrtSession.SessionOptions()
-            if (useNnapi) {
-                try {
-                    // NNAPI 统一抽象 CPU/GPU/NPU；不支持时回退 CPU
-                    opts.addNnapi()
-                } catch (e: Exception) {
-                    opts.addCPU(true)
-                }
-            } else {
+        // 切换模型路径：释放旧模型的所有后端 session，避免多模型常驻内存
+        if (currentPath != modelPath) {
+            releaseAll()
+            currentPath = modelPath
+        }
+
+        val k = backendKey(useNnapi)
+        sessions[k]?.let { return it }
+
+        val opts = OrtSession.SessionOptions()
+        if (useNnapi) {
+            try {
+                // NNAPI 统一抽象 CPU/GPU/NPU；不支持时回退 CPU
+                opts.addNnapi()
+            } catch (e: Exception) {
                 opts.addCPU(true)
             }
-            session = env.createSession(modelPath, opts)
-            currentPath = modelPath
-            currentUseNnapi = useNnapi
+        } else {
+            opts.addCPU(true)
         }
-        return session!!
+        val s = env.createSession(modelPath, opts)
+        sessions[k] = s
+        return s
+    }
+
+    private fun releaseAll() {
+        for (s in sessions.values) {
+            try {
+                s.close()
+            } catch (_: Exception) {
+            }
+        }
+        sessions.clear()
     }
 
     @Synchronized
     fun close() {
-        session?.close()
-        session = null
+        releaseAll()
         currentPath = null
-        currentUseNnapi = false
     }
 }
