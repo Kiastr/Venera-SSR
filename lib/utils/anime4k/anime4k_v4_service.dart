@@ -52,6 +52,8 @@ class Anime4KV4Service {
       if (!await cacheDirectory.exists()) {
         await cacheDirectory.create(recursive: true);
       }
+      // 首次运行把打包进 APK 的模型抽取到应用目录（若已下载/自选或用户已删除则跳过）
+      await Anime4KV4ModelManager.extractBundledModelIfNeeded();
       _modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
     } catch (e) {
       Log.error('Anime4KV4', 'init error: $e');
