@@ -169,7 +169,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
         ).toSliver(),
         SelectSetting(
           title: "Anime4K Version".tl,
-          subtitle: "v4 requires model download (Android only)".tl,
+          help: "v4 requires model download (Android only)".tl,
           settingKey: "anime4KVersion",
           optionTranslation: {
             "v1": "v1 (CPU)".tl,

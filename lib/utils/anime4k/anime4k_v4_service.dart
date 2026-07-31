@@ -154,8 +154,8 @@ class Anime4KV4Service {
     final modelPath = _modelPath;
     if (modelPath == null) return null;
 
-    // v4 前缀避免与 v1（anime4k_cache）及其他缓存串图
-    final fullKey = 'v4_$cacheKey';
+    // v4 前缀 + intensity 避免与 v1 串图，且改强度后不返回旧缓存
+    final fullKey = 'v4_${cacheKey}_${intensity.toStringAsFixed(2)}';
 
     final cached = await _getFromCache(fullKey);
     if (cached != null) {
