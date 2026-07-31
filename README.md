@@ -38,8 +38,8 @@ Cartoon embedded text translation function**
 
 ### 黑白漫画 AI 上色 (Black & White Cartoon Coloring)
 
-> 使用 int8 轻量模型，在线阅读时实时上色
-> Uses int8 lightweight model, Live coloring while reading online
+> 使用 int8 轻量模型，阅读时实时本地上色
+> Uses int8 lightweight model, Live local coloring while reading
 
 | 上色前 (Before) | 上色后 (After) |
 |:---:|:---:|
