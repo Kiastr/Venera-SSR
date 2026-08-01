@@ -24,6 +24,12 @@ import java.util.Collections
  */
 class ColorizeEngine {
 
+    companion object {
+        // NNAPI 输出与 CPU 参考逐通道 MAE 阈值（[0,1] 空间）；超过即判定偏色，整图回退 CPU。
+        // NNAPI 在部分设备上仅做 fp16 近似，正常数值误差远小于此；真偏色（通道错位/染色）通常在 0.1+。
+        private const val NNAPI_COLOR_TOL = 0.04
+    }
+
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val modelManager = ModelManager(env)
 
@@ -306,13 +312,19 @@ class ColorizeEngine {
         rgb.release()
 
         try {
-            // 首选调用方指定的后端；NNAPI 时开启输出自检
-            val out = colorizeEsrganFixedTile(rgbF, h, w, session, intensity, checkSanity = useNnapi)
+            if (!useNnapi) {
+                // CPU：输出恒正确，无需自检
+                return colorizeEsrganFixedTile(rgbF, h, w, session, intensity, cpuRef = null)!!
+            }
+            // NNAPI：首 tile 与 CPU 参考对比，拦截后端返回的错误颜色（典型如整体偏红）。
+            // 旧逻辑只检测"全黑"，漏掉了"偏色但仍非黑"的损坏——某些设备的 NNAPI
+            // 会把 Real-ESRGAN 输出染红而非归零，表现就是超分后发红。
+            val cpuSession = modelManager.getSession(modelPath, false)
+            val out = colorizeEsrganFixedTile(rgbF, h, w, session, intensity, cpuRef = cpuSession)
             if (out != null) return out
 
-            // NNAPI 输出异常 -> 整图切 CPU 重跑
-            val cpuSession = modelManager.getSession(modelPath, false)
-            return colorizeEsrganFixedTile(rgbF, h, w, cpuSession, intensity, checkSanity = false)!!
+            // NNAPI 不可信 -> 整图切 CPU 重跑
+            return colorizeEsrganFixedTile(rgbF, h, w, cpuSession, intensity, cpuRef = null)!!
         } finally {
             rgbF.release()
         }
@@ -320,11 +332,12 @@ class ColorizeEngine {
 
     /**
      * 固定尺寸分块推理。
-     * 返回 null 表示 checkSanity 开启且首个 tile 输出异常（后端不可信），由调用方回退。
+     * 返回 null 表示 NNAPI 首 tile 自检未过（全黑或偏色，后端不可信），由调用方回退 CPU。
+     * cpuRef 非空时开启自检；为 null 时（CPU 路径或回退重跑）不做自检。
      */
     private fun colorizeEsrganFixedTile(
         rgbF: Mat, h: Int, w: Int,
-        session: OrtSession, intensity: Float, checkSanity: Boolean
+        session: OrtSession, intensity: Float, cpuRef: OrtSession?
     ): Bitmap? {
         val scale = 4
         val outH = h * scale
@@ -379,15 +392,40 @@ class ColorizeEngine {
                 tensor.close()
                 results.close()
 
-                // 首个 tile 自检：输入非纯黑但输出全黑 => 后端返回了无效结果
-                if (checkSanity && firstTile) {
+                // 后端健全性自检（仅 NNAPI 首 tile 开启，cpuRef 即 CPU 参考会话）
+                if (cpuRef != null && firstTile) {
                     val inMean = Core.mean(tile).`val`.let { (it[0] + it[1] + it[2]) / 3.0 }
                     val outMean = Core.mean(outTileRgb).`val`.let { (it[0] + it[1] + it[2]) / 3.0 }
+                    // 1) 全黑：输入非黑但输出全黑 => 后端异常（原自检逻辑保留）
                     if (inMean > 0.05 && outMean < 0.01) {
                         outTileRgb.release()
                         tile.release()
                         outRgbU8.release()
                         return null
+                    }
+                    // 2) 偏色：与 CPU 参考 tile 比对，逐通道 MAE 超阈值即判定后端返回了错误颜色
+                    //    （典型如整体偏红）。NNAPI 在部分设备上仅做 fp16 近似，正常数值误差远小于阈值；
+                    //    真偏色（通道错位/染色）的 MAE 通常在 0.1+，阈值取 0.04（≈10/255）留足余量。
+                    try {
+                        val refBuf = ImageUtils.hwcToNchwFloatBuffer(tile)
+                        val refTensor = OnnxTensor.createTensor(
+                            env, refBuf, longArrayOf(1, 3, tileIn.toLong(), tileIn.toLong())
+                        )
+                        val refRes = cpuRef.run(Collections.singletonMap(inputName, refTensor))
+                        val refOut = (refRes.get(0) as OnnxTensor).floatBuffer
+                        val refTileRgb = ImageUtils.nchwToHwcMat(refOut, 3, tileIn * scale, tileIn * scale)
+                        refTensor.close()
+                        refRes.close()
+                        val mae = maxChannelMae(outTileRgb, refTileRgb)
+                        refTileRgb.release()
+                        if (mae > NNAPI_COLOR_TOL) {
+                            outTileRgb.release()
+                            tile.release()
+                            outRgbU8.release()
+                            return null
+                        }
+                    } catch (_: Exception) {
+                        // 参考比对异常则不阻断 NNAPI（退化为仅"全黑"自检）
                     }
                 }
                 firstTile = false
@@ -441,6 +479,19 @@ class ColorizeEngine {
 
     fun close() {
         modelManager.close()
+    }
+
+    /**
+     * 两个 float HWC Mat 的逐通道 mean absolute error，取三通道中的最大值。
+     * 用于 NNAPI 输出与 CPU 参考的偏色比对：空间细节的 fp16 噪声会相互抵消，
+     * 但通道错位/染色的 MAE 会显著偏高。
+     */
+    private fun maxChannelMae(a: Mat, b: Mat): Double {
+        val d = Mat()
+        Core.absdiff(a, b, d)
+        val m = Core.mean(d).`val` // 三通道各自的 mean abs error
+        d.release()
+        return maxOf(m[0], m[1], m[2])
     }
 
     /// 丢弃已缓存的 ONNX 会话（仅关闭 session，不释放 env）。
