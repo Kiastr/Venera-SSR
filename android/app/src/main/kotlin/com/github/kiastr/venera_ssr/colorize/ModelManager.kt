@@ -12,43 +12,43 @@ import ai.onnxruntime.OrtSession
  */
 class ModelManager(private val env: OrtEnvironment) {
 
-    @Volatile
-    private var session: OrtSession? = null
+    // 按 "模型路径|后端" 分别缓存 session。
+    // 旧实现只持有单个 session，NNAPI↔CPU 交替使用（如上色走 NNAPI、放大回退 CPU）
+    // 会反复 close + 重新加载模型 + 重编译计算图，翻页时表现为明显卡顿。
+    private val sessions = HashMap<String, OrtSession>()
 
-    @Volatile
-    private var currentPath: String? = null
-
-    @Volatile
-    private var currentUseNnapi: Boolean = false
+    private fun key(modelPath: String, useNnapi: Boolean) =
+        "$modelPath|${if (useNnapi) "nnapi" else "cpu"}"
 
     @Synchronized
     fun getSession(modelPath: String, useNnapi: Boolean): OrtSession {
-        // 路径或执行后端变化时必须重建 session，否则 NNAPI→CPU 回退会复用旧 NNAPI session
-        if (session == null || currentPath != modelPath || currentUseNnapi != useNnapi) {
-            session?.close()
-            val opts = OrtSession.SessionOptions()
-            if (useNnapi) {
-                try {
-                    // NNAPI 统一抽象 CPU/GPU/NPU；不支持时回退 CPU
-                    opts.addNnapi()
-                } catch (e: Exception) {
-                    opts.addCPU(true)
-                }
-            } else {
+        val k = key(modelPath, useNnapi)
+        sessions[k]?.let { return it }
+
+        val opts = OrtSession.SessionOptions()
+        if (useNnapi) {
+            try {
+                // NNAPI 统一抽象 CPU/GPU/NPU；不支持时回退 CPU
+                opts.addNnapi()
+            } catch (e: Exception) {
                 opts.addCPU(true)
             }
-            session = env.createSession(modelPath, opts)
-            currentPath = modelPath
-            currentUseNnapi = useNnapi
+        } else {
+            opts.addCPU(true)
         }
-        return session!!
+        val s = env.createSession(modelPath, opts)
+        sessions[k] = s
+        return s
     }
 
     @Synchronized
     fun close() {
-        session?.close()
-        session = null
-        currentPath = null
-        currentUseNnapi = false
+        for (s in sessions.values) {
+            try {
+                s.close()
+            } catch (_: Exception) {
+            }
+        }
+        sessions.clear()
     }
 }
