@@ -67,14 +67,15 @@ object ImageUtils {
      */
     fun nchwToHwcMat(buf: FloatBuffer, c: Int, h: Int, w: Int): Mat {
         buf.rewind()
-        val nchw = FloatArray(c * h * w)
-        buf.get(nchw) // NCHW: [ch][y][x] = nchw[ch*(h*w) + y*w + x]
-        // 转置 NCHW -> HWC
         val hwc = FloatArray(c * h * w)
+        val plane = h * w
+        // 直接从 FloatBuffer 按绝对索引读取（省去一份 NCHW 中间数组），
+        // 与 numpy.transpose(1,2,0) 等价：hwc[(y*w+x)*c+ch] = nchw[ch*plane + y*w + x]
         for (ch in 0 until c) {
+            val base = ch * plane
             for (y in 0 until h) {
                 for (x in 0 until w) {
-                    hwc[(y * w + x) * c + ch] = nchw[ch * (h * w) + y * w + x]
+                    hwc[(y * w + x) * c + ch] = buf.get(base + y * w + x)
                 }
             }
         }

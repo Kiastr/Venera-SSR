@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
+import org.opencv.core.Rect
 import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
@@ -273,47 +274,111 @@ class ColorizeEngine {
     // 对应 realesrgan 官方推理（img/255 -> RGB -> NCHW -> 推理 -> NCHW -> RGB -> *255）
     //  - 不归一化到 ImageNet 均值（animevideov3 仅 /255）
     //  - intensity 围绕中性灰 0.5 做对比缩放（默认 1.0 = 不变）
+    //
+    // 分块(tile)推理：整图输出张量 (1,3,4H,4W) 的 float buffer 在 ART 堆上分配，
+    // 大图（约 1080px 起）即超过 ~384MB 增长上限触发 OutOfMemoryError（COLORIZE_FAILED）。
+    // 改为按 tile 推理，单 tile 输出 float buffer 控制在数十 MB 内规避 OOM；
+    // 重叠 tilePad + 中心裁剪消除分块接缝；intensity 在每 tile 的 float 空间计算后
+    // 直接写入整图 uint8 输出（不持有整张 float32 输出，否则仍会 OOM）。
     // ----------------------------------------------------------------
     private fun colorizeEsrgan(inputBitmap: Bitmap, session: OrtSession, intensity: Float): Bitmap {
         val bgr = ImageUtils.bitmapToBgrMat(inputBitmap) // (H,W,3) BGR uint8
         val h = bgr.height()
         val w = bgr.width()
-        val outH = h * 4
-        val outW = w * 4
+        val scale = 4
+        val outH = h * scale
+        val outW = w * scale
 
-        // BGR -> RGB（模型以 RGB 训练）
+        // BGR -> RGB -> float32 [0,1]
         val rgb = Mat()
         Imgproc.cvtColor(bgr, rgb, Imgproc.COLOR_BGR2RGB)
-        // -> float32 0–1（/255，关键：animevideov3 仅归一化到 [0,1]）
         val rgbF = Mat()
         rgb.convertTo(rgbF, CvType.CV_32F, 1.0 / 255.0)
+        bgr.release()
+        rgb.release()
 
-        // NCHW [1,3,H,W] 0–1
-        val buf = ImageUtils.hwcToNchwFloatBuffer(rgbF)
-        val inputName = session.inputNames.iterator().next()
-        val tensor = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, h.toLong(), w.toLong()))
-        val results = session.run(Collections.singletonMap(inputName, tensor))
-        // Result.get(int) 直接取 OnnxValue（避免 Optional 转型异常）
-        val outBuf = (results.get(0) as OnnxTensor).floatBuffer // (1,3,4H,4W) NCHW RGB 0–1
-        val outRgb = ImageUtils.nchwToHwcMat(outBuf, 3, outH, outW) // (4H,4W,3) RGB float 0–1
-        tensor.close()
-        results.close()
+        // 全图 uint8 输出（不持有整张 float32，防止 OOM）
+        val outRgbU8 = Mat.zeros(outH, outW, CvType.CV_8UC(3))
 
-        // intensity：围绕 0.5 做对比缩放（默认 1.0 = 不变），在 float 空间计算避免截断误差
-        if (intensity != 1.0f) {
-            val half = Mat(outRgb.size(), outRgb.type(), Scalar(0.5))
-            val centered = Mat()
-            Core.subtract(outRgb, half, centered)
-            Core.multiply(centered, Scalar(intensity.toDouble()), centered)
-            Core.add(centered, half, outRgb)
-            centered.release()
-            half.release()
+        val tileSize = 256
+        val tilePad = 16
+
+        var yy = 0
+        while (yy < h) {
+            val yyEnd = minOf(h, yy + tileSize)
+            val tileH = yyEnd - yy
+            var xx = 0
+            while (xx < w) {
+                val xxEnd = minOf(w, xx + tileSize)
+                val tileW = xxEnd - xx
+
+                // 重叠 padding：超出图像边界时用反射填充，模型边界推理更稳
+                val padTop = minOf(tilePad, yy)
+                val padLeft = minOf(tilePad, xx)
+                val padBottom = minOf(tilePad, h - yyEnd)
+                val padRight = minOf(tilePad, w - xxEnd)
+
+                val padded = Mat(rgbF, Rect(
+                    xx - padLeft, yy - padTop,
+                    tileW + padLeft + padRight,
+                    tileH + padTop + padBottom
+                ))
+                val paddedTile = Mat()
+                if (padTop > 0 || padBottom > 0 || padLeft > 0 || padRight > 0) {
+                    Core.copyMakeBorder(padded, paddedTile, padTop, padBottom, padLeft, padRight, Core.BORDER_REFLECT)
+                } else {
+                    padded.copyTo(paddedTile)
+                }
+
+                // 推理：paddedTile (th,tw,3) float [0,1] -> outBuf (1,3,4th,4tw) NCHW
+                val buf = ImageUtils.hwcToNchwFloatBuffer(paddedTile)
+                val inputName = session.inputNames.iterator().next()
+                val tensor = OnnxTensor.createTensor(env, buf,
+                    longArrayOf(1, 3, paddedTile.height().toLong(), paddedTile.width().toLong()))
+                val results = session.run(Collections.singletonMap(inputName, tensor))
+                val outBuf = (results.get(0) as OnnxTensor).floatBuffer // (1,3,4th,4tw) NCHW RGB [0,1]
+                val outTileH = paddedTile.height() * scale
+                val outTileW = paddedTile.width() * scale
+                val outTileRgb = ImageUtils.nchwToHwcMat(outBuf, 3, outTileH, outTileW) // (4th,4tw,3) float [0,1]
+                tensor.close()
+                results.close()
+
+                // 中心裁剪：去掉 padding 对应的输出区域，消除接缝
+                val cropTileRgb = Mat(outTileRgb,
+                    Rect(padLeft * scale, padTop * scale, tileW * scale, tileH * scale))
+                val cropTileRgbCopy = Mat()
+                cropTileRgb.copyTo(cropTileRgbCopy)
+                outTileRgb.release()
+
+                // intensity：围绕 0.5 做对比缩放，在 float 空间计算避免截断误差
+                if (intensity != 1.0f) {
+                    val half = Mat(cropTileRgbCopy.size(), cropTileRgbCopy.type(), Scalar(0.5))
+                    val centered = Mat()
+                    Core.subtract(cropTileRgbCopy, half, centered)
+                    Core.multiply(centered, Scalar(intensity.toDouble()), centered)
+                    Core.add(centered, half, cropTileRgbCopy)
+                    centered.release()
+                    half.release()
+                }
+
+                // *255 -> uint8（cvRound + 饱和截断 = clip[0,255]）
+                val cropTileU8 = Mat()
+                cropTileRgbCopy.convertTo(cropTileU8, CvType.CV_8U)
+                cropTileRgbCopy.release()
+
+                // 写入整图输出 ROI
+                val roi = Mat(outRgbU8, Rect(xx * scale, yy * scale, tileW * scale, tileH * scale))
+                cropTileU8.copyTo(roi)
+                cropTileU8.release()
+                roi.release()
+                paddedTile.release()
+
+                xx = xxEnd
+            }
+            yy = yyEnd
         }
 
-        // *255 -> uint8（cvRound + 饱和截断 = clip[0,255]）
-        val outRgbU8 = Mat()
-        outRgb.convertTo(outRgbU8, CvType.CV_8U)
-        outRgb.release()
+        rgbF.release()
 
         // RGB -> BGR（bgrMatToBitmap 内部再做 BGR2RGBA）
         val outBgr = Mat()
@@ -322,9 +387,6 @@ class ColorizeEngine {
 
         val outBitmap = ImageUtils.bgrMatToBitmap(outBgr) // 内部 BGR2RGBA
         outBgr.release()
-        bgr.release()
-        rgb.release()
-        rgbF.release()
         return outBitmap
     }
 
