@@ -51,7 +51,7 @@ class ColorizeEngine {
         val session = modelManager.getSession(modelPath, useNnapi)
         val out = when (type) {
             "ddcolor" -> colorizeDdcolor(working, session, intensity)
-            "esrgan" -> colorizeEsrgan(working, session, intensity)
+            "esrgan" -> colorizeEsrgan(working, session, modelPath, useNnapi, intensity)
             else -> colorizeDeoldify(working, session, intensity)
         }
         if (needsRecycle) working.recycle()
@@ -275,20 +275,97 @@ class ColorizeEngine {
     //  - 不归一化到 ImageNet 均值（animevideov3 仅 /255）
     //  - intensity 围绕中性灰 0.5 做对比缩放（默认 1.0 = 不变）
     //
-    // 分块(tile)推理：整图输出张量 (1,3,4H,4W) 的 float buffer 在 ART 堆上分配，
-    // 大图（约 1080px 起）即超过 ~384MB 增长上限触发 OutOfMemoryError（COLORIZE_FAILED）。
-    // 改为按 tile 推理，单 tile 输出 float buffer 控制在数十 MB 内规避 OOM；
-    // 重叠 tilePad + 中心裁剪消除分块接缝；intensity 在每 tile 的 float 空间计算后
-    // 直接写入整图 uint8 输出（不持有整张 float32 输出，否则仍会 OOM）。
+    // 内存与后端策略：
+    //  - 小图（整图输出 float buffer ≤ 120MB）走整图推理，沿用调用方后端
+    //    （NNAPI 快且正确，与原行为一致）
+    //  - 大图整图输出会超过 ART ~384MB 增长上限触发 OOM；改为分块推理。
+    //    分块强制 CPU 后端：ONNX Runtime 的 NNAPI EP 对动态/小 tile 形状支持脆弱，
+    //    会出现重编译卡顿且返回错误（黑屏）结果；CPU EP 对任意动态形状稳定正确。
+    //  - 分块重叠 tilePad + 中心裁剪消除接缝；不持有整张 float32 输出（防 OOM）。
     // ----------------------------------------------------------------
-    private fun colorizeEsrgan(inputBitmap: Bitmap, session: OrtSession, intensity: Float): Bitmap {
+    private fun colorizeEsrgan(
+        inputBitmap: Bitmap,
+        session: OrtSession,
+        modelPath: String,
+        useNnapi: Boolean,
+        intensity: Float
+    ): Bitmap {
         val bgr = ImageUtils.bitmapToBgrMat(inputBitmap) // (H,W,3) BGR uint8
         val h = bgr.height()
         val w = bgr.width()
         val scale = 4
         val outH = h * scale
         val outW = w * scale
+        // 整图输出 float buffer 字节数 ≈ 3 * 4H * 4W * 4
+        val wholeOutBytes = 48L * h * w
+        val SAFE = 120L * 1024 * 1024 // 120MB 余量，低于 ART 增长上限避免 OOM
+        return if (wholeOutBytes <= SAFE) {
+            // 小图：整图推理，沿用调用方后端（NNAPI 快且正确，与原行为一致）
+            colorizeEsrganWhole(bgr, h, w, outH, outW, scale, session, intensity)
+        } else {
+            // 大图：强制 CPU 后端分块推理，规避 NNAPI 动态/小 tile 形状黑屏与重编译卡顿
+            val cpuSession = modelManager.getSession(modelPath, false)
+            colorizeEsrganTiled(bgr, h, w, outH, outW, scale, cpuSession, intensity)
+        }
+    }
 
+    // 整图推理（小图，沿用调用方后端 NNAPI/CPU）
+    private fun colorizeEsrganWhole(
+        bgr: Mat, h: Int, w: Int, outH: Int, outW: Int, scale: Int,
+        session: OrtSession, intensity: Float
+    ): Bitmap {
+        // BGR -> RGB（模型以 RGB 训练）
+        val rgb = Mat()
+        Imgproc.cvtColor(bgr, rgb, Imgproc.COLOR_BGR2RGB)
+        // -> float32 0–1（/255，关键：animevideov3 仅归一化到 [0,1]）
+        val rgbF = Mat()
+        rgb.convertTo(rgbF, CvType.CV_32F, 1.0 / 255.0)
+
+        // NCHW [1,3,H,W] 0–1
+        val buf = ImageUtils.hwcToNchwFloatBuffer(rgbF)
+        val inputName = session.inputNames.iterator().next()
+        val tensor = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, h.toLong(), w.toLong()))
+        val results = session.run(Collections.singletonMap(inputName, tensor))
+        // Result.get(int) 直接取 OnnxValue（避免 Optional 转型异常）
+        val outBuf = (results.get(0) as OnnxTensor).floatBuffer // (1,3,4H,4W) NCHW RGB 0–1
+        val outRgb = ImageUtils.nchwToHwcMat(outBuf, 3, outH, outW) // (4H,4W,3) RGB float 0–1
+        tensor.close()
+        results.close()
+
+        // intensity：围绕 0.5 做对比缩放（默认 1.0 = 不变），在 float 空间计算避免截断误差
+        if (intensity != 1.0f) {
+            val half = Mat(outRgb.size(), outRgb.type(), Scalar(0.5))
+            val centered = Mat()
+            Core.subtract(outRgb, half, centered)
+            Core.multiply(centered, Scalar(intensity.toDouble()), centered)
+            Core.add(centered, half, outRgb)
+            centered.release()
+            half.release()
+        }
+
+        // *255 -> uint8（cvRound + 饱和截断 = clip[0,255]）
+        val outRgbU8 = Mat()
+        outRgb.convertTo(outRgbU8, CvType.CV_8U)
+        outRgb.release()
+
+        // RGB -> BGR（bgrMatToBitmap 内部再做 BGR2RGBA）
+        val outBgr = Mat()
+        Imgproc.cvtColor(outRgbU8, outBgr, Imgproc.COLOR_RGB2BGR)
+        outRgbU8.release()
+
+        val outBitmap = ImageUtils.bgrMatToBitmap(outBgr) // 内部 BGR2RGBA
+        outBgr.release()
+        bgr.release()
+        rgb.release()
+        rgbF.release()
+        return outBitmap
+    }
+
+    // 分块推理（大图，强制 CPU 后端）
+    private fun colorizeEsrganTiled(
+        bgr: Mat, h: Int, w: Int, outH: Int, outW: Int, scale: Int,
+        session: OrtSession, intensity: Float
+    ): Bitmap {
         // BGR -> RGB -> float32 [0,1]
         val rgb = Mat()
         Imgproc.cvtColor(bgr, rgb, Imgproc.COLOR_BGR2RGB)
@@ -300,7 +377,7 @@ class ColorizeEngine {
         // 全图 uint8 输出（不持有整张 float32，防止 OOM）
         val outRgbU8 = Mat.zeros(outH, outW, CvType.CV_8UC(3))
 
-        val tileSize = 256
+        val tileSize = 384
         val tilePad = 16
 
         var yy = 0
