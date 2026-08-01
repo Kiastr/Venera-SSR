@@ -501,7 +501,7 @@ class ColorizeEngine {
                 // 推理：tile (tileIn,tileIn,channels) float[0,1] -> (1,channels,scale*tileIn,scale*tileIn) NCHW
                 val buf = ImageUtils.hwcToNchwFloatBuffer(tile)
                 val tensor = OnnxTensor.createTensor(
-                    env, buf, longArrayOf(1, channels, tileIn.toLong(), tileIn.toLong())
+                    env, buf, longArrayOf(1L, channels.toLong(), tileIn.toLong(), tileIn.toLong())
                 )
                 val results = session.run(Collections.singletonMap(inputName, tensor))
                 val outBuf = (results.get(0) as OnnxTensor).floatBuffer
@@ -540,7 +540,7 @@ class ColorizeEngine {
                         try {
                             val refBuf = ImageUtils.hwcToNchwFloatBuffer(tile)
                             val refTensor = OnnxTensor.createTensor(
-                                env, refBuf, longArrayOf(1, channels, tileIn.toLong(), tileIn.toLong())
+                                env, refBuf, longArrayOf(1L, channels.toLong(), tileIn.toLong(), tileIn.toLong())
                             )
                             val refRes = cpuRef.run(Collections.singletonMap(inputName, refTensor))
                             val refOut = (refRes.get(0) as OnnxTensor).floatBuffer
@@ -701,7 +701,7 @@ class ColorizeEngine {
                 val buf = ImageUtils.hwcToNchwFloatBuffer(dummy)
                 dummy.release()
                 val tensor = OnnxTensor.createTensor(
-                    env, buf, longArrayOf(1, ch, probeIn.toLong(), probeIn.toLong())
+                    env, buf, longArrayOf(1L, ch.toLong(), probeIn.toLong(), probeIn.toLong())
                 )
                 val results = cpuSession.run(Collections.singletonMap(inputName, tensor))
                 val outBuf = (results.get(0) as OnnxTensor).floatBuffer
