@@ -405,18 +405,12 @@ class ColorizeEngine {
         y.release()
 
         try {
+            // ACNet 1 通道模型强制走 CPU：NNAPI 对单通道输入支持不佳（部分设备返回全灰 Y
+            // 而非抛异常，自检可能漏判）。ACNet 仅 21KB、极轻量，CPU 足够快，无需 NNAPI。
             val cpuSession = modelManager.getSession(modelPath, false)
-            val outY = if (!useNnapi) {
-                colorizeEsrganFixedTile(
-                    yF, h, w, session, intensity, scale, cpuRef = null, channels = 1
-                )!!
-            } else {
-                colorizeEsrganFixedTile(
-                    yF, h, w, session, intensity, scale, cpuRef = cpuSession, channels = 1
-                ) ?: colorizeEsrganFixedTile(
-                    yF, h, w, cpuSession, intensity, scale, cpuRef = null, channels = 1
-                )!!
-            }
+            val outY = colorizeEsrganFixedTile(
+                yF, h, w, cpuSession, intensity, scale, cpuRef = null, channels = 1
+            )!!
 
             // 色度双线性放大（保持 uint8，与 Y 输出合并）
             val outW = w * scale
