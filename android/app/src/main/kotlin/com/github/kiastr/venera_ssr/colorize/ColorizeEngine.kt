@@ -345,7 +345,7 @@ class ColorizeEngine {
 
         // *255 -> uint8（cvRound + 饱和截断 = clip[0,255]）
         val outRgbU8 = Mat()
-        outRgb.convertTo(outRgbU8, CvType.CV_8U)
+        outRgb.convertTo(outRgbU8, CvType.CV_8U, 255.0)
         outRgb.release()
 
         // RGB -> BGR（bgrMatToBitmap 内部再做 BGR2RGBA）
@@ -440,7 +440,7 @@ class ColorizeEngine {
 
                 // *255 -> uint8（cvRound + 饱和截断 = clip[0,255]）
                 val cropTileU8 = Mat()
-                cropTileRgbCopy.convertTo(cropTileU8, CvType.CV_8U)
+                cropTileRgbCopy.convertTo(cropTileU8, CvType.CV_8U, 255.0)
                 cropTileRgbCopy.release()
 
                 // 写入整图输出 ROI
