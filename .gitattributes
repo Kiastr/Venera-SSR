@@ -4,3 +4,12 @@
 # 原因：CI 的 actions/checkout 默认不拉取 LFS（lfs: false），若走 LFS 会在构建时
 # 得到指针文件而非真实模型，导致打包进 APK 的 asset 损坏。此文件体积小，直接入库最稳。
 assets/models/realesr_animevideov3.onnx !filter !diff !merge text=false
+# 例外：翻译分支内置的小模型（均 <100MB）作为普通 git blob 存储，不走 LFS。
+# 原因：GitHub 仅对 >100MB 文件强制 LFS；这些小模型走 LFS 会无意义地占用 LFS 存储/带宽配额。
+# 仅 encoder.tflite(163.8MB) 超过 100MB，保留 LFS。
+android/app/src/main/assets/models/detection/PP-OCRv6_det_mobile_infer.onnx !filter !diff !merge text=false
+android/app/src/main/assets/models/detection/manga109-segmentation-bubble.onnx !filter !diff !merge text=false
+android/app/src/main/assets/models/detection/yolo11n-text.onnx !filter !diff !merge text=false
+android/app/src/main/assets/models/ocr/PP-OCRv6_small_rec.onnx !filter !diff !merge text=false
+android/app/src/main/assets/models/ocr/korean_PP-OCRv3_rec_infer.onnx !filter !diff !merge text=false
+android/app/src/main/assets/models/ocr/manga_ocr_mobile/decoder.tflite !filter !diff !merge text=false
