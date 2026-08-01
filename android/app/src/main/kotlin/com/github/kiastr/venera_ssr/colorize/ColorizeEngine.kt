@@ -17,7 +17,7 @@ import java.util.Collections
  * 上色/超分计算核心。三个函数严格对齐参考实现：
  *  - DeOldify 输入值域 0–255（不归一化），输出完整 BGR
  *  - DDColor  输入值域 0–1（/255），输出仅 ab 两通道，需与原图 L 拼接
- *  - ESRGAN   输入值域 0–1（/255），输出完整 RGB [1,3,4H,4W]，固定 4x
+ *  - ESRGAN   输入值域 0–1（/255），输出完整 RGB [1,3,scale·H,scale·W]；scale 由模型实际维度推导（见 getScale），当前权重 4x
  *  - OpenCV float-LAB 真实范围 L∈[0,100]、a,b∈[−128,127]，必须用 OpenCV 转换
  *
  * 移植自 AiColorize（com.kiastr.aicolorize.ColorizeEngine），经真机模型端到端验证。
@@ -276,7 +276,7 @@ class ColorizeEngine {
     }
 
     // ----------------------------------------------------------------
-    // ESRGAN (Real-ESRGAN animevideov3)：输入 0–1，固定 4x 输出完整 RGB
+    // ESRGAN (Real-ESRGAN animevideov3)：输入 0–1，输出完整 RGB；放大倍数由模型实际维度推导（见 getScale），当前权重为 4x
     // 对应 realesrgan 官方推理（img/255 -> RGB -> NCHW -> 推理 -> NCHW -> *255）
     //  - 不归一化到 ImageNet 均值（animevideov3 仅 /255）
     //  - intensity 围绕中性灰 0.5 做对比缩放（默认 1.0 = 不变）
@@ -312,19 +312,22 @@ class ColorizeEngine {
         rgb.release()
 
         try {
+            // 放大倍数从模型实际输入/输出维度推导（探测一次并缓存），不再硬编码 4——
+            // 换 2x 模型时自动适配，无需改代码。用 CPU 会话探测，与 NNAPI 是否偏色无关。
+            val cpuSession = modelManager.getSession(modelPath, false)
+            val scale = getScale(modelPath, cpuSession)
             if (!useNnapi) {
                 // CPU：输出恒正确，无需自检
-                return colorizeEsrganFixedTile(rgbF, h, w, session, intensity, cpuRef = null)!!
+                return colorizeEsrganFixedTile(rgbF, h, w, session, intensity, scale, cpuRef = null)!!
             }
             // NNAPI：首 tile 与 CPU 参考对比，拦截后端返回的错误颜色（典型如整体偏红）。
             // 旧逻辑只检测"全黑"，漏掉了"偏色但仍非黑"的损坏——某些设备的 NNAPI
             // 会把 Real-ESRGAN 输出染红而非归零，表现就是超分后发红。
-            val cpuSession = modelManager.getSession(modelPath, false)
-            val out = colorizeEsrganFixedTile(rgbF, h, w, session, intensity, cpuRef = cpuSession)
+            val out = colorizeEsrganFixedTile(rgbF, h, w, session, intensity, scale, cpuRef = cpuSession)
             if (out != null) return out
 
             // NNAPI 不可信 -> 整图切 CPU 重跑
-            return colorizeEsrganFixedTile(rgbF, h, w, cpuSession, intensity, cpuRef = null)!!
+            return colorizeEsrganFixedTile(rgbF, h, w, cpuSession, intensity, scale, cpuRef = null)!!
         } finally {
             rgbF.release()
         }
@@ -337,9 +340,8 @@ class ColorizeEngine {
      */
     private fun colorizeEsrganFixedTile(
         rgbF: Mat, h: Int, w: Int,
-        session: OrtSession, intensity: Float, cpuRef: OrtSession?
+        session: OrtSession, intensity: Float, scale: Int, cpuRef: OrtSession?
     ): Bitmap? {
-        val scale = 4
         val outH = h * scale
         val outW = w * scale
 
@@ -492,6 +494,40 @@ class ColorizeEngine {
         val m = Core.mean(d).`val` // 三通道各自的 mean abs error
         d.release()
         return maxOf(m[0], m[1], m[2])
+    }
+
+    /**
+     * 从模型实际前向的输入/输出维度推导放大倍数（scale）。
+     * 用一次极小的 dummy 前向（CPU 会话，与 NNAPI 是否偏色无关）测量输出/输入的空间比值，
+     * 按 modelPath 缓存。这样换 2x/4x 权重时无需改代码即可自动适配，当前 animevideov3 为 4x。
+     *
+     * 用输出 NCHW float buffer 的长度反推边长，避免依赖各 onnxruntime 版本输出 shape API 的差异。
+     */
+    private val scaleCache = HashMap<String, Int>()
+
+    private fun getScale(modelPath: String, cpuSession: OrtSession): Int {
+        synchronized(scaleCache) {
+            scaleCache[modelPath]?.let { return it }
+        }
+        val probeIn = 64 // 正方形小图，输出必为 (probeIn*scale)²，避免动态维度干扰
+        val inputName = cpuSession.inputNames.iterator().next()
+        // 全零 dummy 即可：放大倍数只取决于形状，与具体数值无关
+        val dummy = Mat.zeros(probeIn, probeIn, CvType.CV_32FC(3))
+        val buf = ImageUtils.hwcToNchwFloatBuffer(dummy)
+        dummy.release()
+        val tensor = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, probeIn.toLong(), probeIn.toLong()))
+        val results = cpuSession.run(Collections.singletonMap(inputName, tensor))
+        val outBuf = (results.get(0) as OnnxTensor).floatBuffer
+        val total = outBuf.remaining().toLong()       // 1*3*outH*outW
+        val px = total / 3                            // outH*outW
+        val side = kotlin.math.sqrt(px.toDouble()).roundToLong() // 输入正方形 => 输出正方形
+        tensor.close()
+        results.close()
+        val scale = if (side > 0 && side % probeIn == 0L) (side / probeIn).toInt() else 4
+        synchronized(scaleCache) {
+            scaleCache[modelPath] = scale
+        }
+        return scale
     }
 
     /// 丢弃已缓存的 ONNX 会话（仅关闭 session，不释放 env）。
