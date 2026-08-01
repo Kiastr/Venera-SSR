@@ -56,6 +56,16 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
     setState(() {});
   }
 
+  /// 切换 v4 超分模型（4x/2x）。不同倍数输出尺寸不同，清缓存避免串图。
+  Future<void> _selectModel(String id) async {
+    if (Anime4KV4ModelManager.selectedDef.id == id) return;
+    await Anime4KV4Service.instance.setModel(id);
+    PaintingBinding.instance.imageCache.clear();
+    ComicImage.clear();
+    await _refreshModelStatus();
+    if (mounted) setState(() {});
+  }
+
   Future<void> _downloadModel() async {
     if (_isDownloading) return;
     setState(() {
@@ -136,7 +146,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
         return;
       }
       // 通过原生 ContentResolver 以 64KB 分块拷贝（不占内存、不拷坏），
-      // 直接落到模型调用位置 realesr_animevideov3.onnx。
+      // 直接落到当前选中模型的调用位置（fileName）。
       final uri = xFile.path; // content URI 或真实文件路径
       final dir = await getApplicationSupportDirectory();
       final targetPath = path.join(dir.path, Anime4KV4ModelManager.modelFileName);
@@ -193,7 +203,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
     await showInputDialog(
       context: context,
       title: "Add Mirror URL".tl,
-      hintText: "https://.../realesr-animevideov3.onnx",
+      hintText: "https://.../${Anime4KV4ModelManager.modelFileName}",
       confirmText: "Add".tl,
       onConfirm: (url) async {
         await Anime4KV4ModelManager.addModelUrl(url);
@@ -232,7 +242,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                 return ContentDialog(
                   title: "Model Required".tl,
                   content: Text(
-                    "Anime4K v4 model is not downloaded. Download (~4MB) to enable?"
+                    "Anime4K v4 model (${Anime4KV4ModelManager.selectedDef.displayName}) is not downloaded. Download (~${Anime4KV4ModelManager.selectedDef.sizeHintMB}MB) to enable?"
                         .tl,
                   ).paddingHorizontal(16).fixWidth(double.infinity),
                   actions: [
@@ -295,6 +305,24 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             ),
           ),
         ),
+        // v4 模型（倍数）选择：4x 动画 / 2x 通用
+        if (isV4)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Wrap(
+                spacing: 8,
+                children: Anime4KV4ModelManager.getModels().map((m) {
+                  final selected = Anime4KV4ModelManager.selectedDef.id == m.id;
+                  return ChoiceChip(
+                    label: Text("${m.scale}×  ${m.displayName}".tl),
+                    selected: selected,
+                    onSelected: (_) => _selectModel(m.id),
+                  );
+                }).toList(),
+              ),
+            ),
+          ),
         // v1 专用参数（Scale/Push/Grad）：仅 v1 显示
         SliverAnimatedVisibility(
           visible: !isV4,
@@ -324,11 +352,13 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             ],
           ),
         ),
-        // v4 强度（固定 4x，仅调节强度）
+        // v4 强度（倍数由模型决定，仅调节强度）
         SliverAnimatedVisibility(
           visible: isV4,
           child: _SliderSetting(
-            title: "Upscale Intensity (v4 · 4x fixed)".tl,
+            title:
+                "Upscale Intensity (v4 · ${Anime4KV4ModelManager.selectedDef.scale}x)"
+                    .tl,
             settingsIndex: "anime4KV4Intensity",
             min: 0.3,
             max: 1.2,
@@ -369,14 +399,15 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      "Real-ESRGAN (animevideov3)".tl,
+                      Anime4KV4ModelManager.selectedDef.displayName.tl,
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 8),
                     Text(
                       _isModelDownloaded
                           ? "Model downloaded".tl
-                          : "Model not downloaded (~4MB)".tl,
+                          : "Model not downloaded (~${Anime4KV4ModelManager.selectedDef.sizeHintMB}MB)"
+                              .tl,
                       style: TextStyle(
                         color: context.colorScheme.onSurfaceVariant,
                         fontSize: 12,
