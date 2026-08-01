@@ -10,7 +10,7 @@ import 'package:venera/utils/colorization/colorization_service.dart';
 
 /// 单个 v4 超分模型的定义。
 ///
-/// [scale] 仅作 UI 提示；真正的放大倍数由原生 [ColorizeEngine.getScale] 从模型
+/// [scale] 仅作 UI 提示；真正的放大倍数与输入通道数（3=RGB / 1=Y）由原生 [ColorizeEngine.getModelInfo] 从模型
 /// 实际输入/输出维度探测，因此换权重（4x/2x）无需改原生代码。
 class V4ModelDef {
   final String id;
