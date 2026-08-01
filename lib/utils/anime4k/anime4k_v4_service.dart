@@ -13,7 +13,7 @@ import 'anime4k_v4_model_manager.dart';
 
 /// Anime4K v4 超分服务（带模型版本）
 ///
-/// 基于 Real-ESRGAN ONNX 模型（默认 4x animevideov3，可选 2x general-x2c），经原生
+/// 基于 Anime4K v4 超分 ONNX 模型（默认官方 ACNet 2×，可选 Real-ESRGAN 4× / 通用 2×），经原生
 /// （Kotlin + ONNX Runtime + NNAPI GPU）完成超分辨率，倍数由模型实际维度决定。
 /// 设计严格对齐 [ColorizationService]：
 ///  - 单例 + 缓存 + 任务队列；
@@ -54,9 +54,9 @@ class Anime4KV4Service {
       if (!await cacheDirectory.exists()) {
         await cacheDirectory.create(recursive: true);
       }
-      // 同步“当前选中模型”（默认 4x），再抽取内置模型/确认可用
+      // 同步“当前选中模型”（默认 ACNet 2x），再抽取内置模型/确认可用
       await Anime4KV4ModelManager.setSelectedModelId(
-        (appdata.settings['anime4KV4Model'] as String?) ?? 'anime4k_x4',
+        (appdata.settings['anime4KV4Model'] as String?) ?? 'anime4k_acnet',
       );
       await Anime4KV4ModelManager.extractBundledModelIfNeeded();
       _modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
