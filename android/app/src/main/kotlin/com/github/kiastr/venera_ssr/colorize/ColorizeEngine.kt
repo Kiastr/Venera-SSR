@@ -19,7 +19,7 @@ import kotlin.math.roundToLong
  * 上色/超分计算核心。三个函数严格对齐参考实现：
  *  - DeOldify 输入值域 0–255（不归一化），输出完整 BGR
  *  - DDColor  输入值域 0–1（/255），输出仅 ab 两通道，需与原图 L 拼接
- *  - ESRGAN   输入值域 0–1（/255），输出完整 RGB [1,3,scale·H,scale·W]；scale 由模型实际维度推导（见 getScale），当前权重 4x
+ *  - ESRGAN   输入值域 0–1（/255），输出完整 RGB [1,3,scale·H,scale·W]；scale 由模型实际维度推导（见 getScale），支持 4x Real-ESRGAN 与 2x 官方 Anime4K v4 ACNet（模型无关，换权重无需改原生）
  *  - OpenCV float-LAB 真实范围 L∈[0,100]、a,b∈[−128,127]，必须用 OpenCV 转换
  *
  * 移植自 AiColorize（com.kiastr.aicolorize.ColorizeEngine），经真机模型端到端验证。
@@ -283,7 +283,7 @@ class ColorizeEngine {
     }
 
     // ----------------------------------------------------------------
-    // ESRGAN (Real-ESRGAN animevideov3)：输入 0–1，输出完整 RGB；放大倍数由模型实际维度推导（见 getScale），当前权重为 4x
+    // ESRGAN / ACNet：输入 0–1，输出完整 RGB；放大倍数由模型实际维度推导（见 getScale），当前支持 4x Real-ESRGAN 与 2x 官方 Anime4K v4 ACNet
     // 对应 realesrgan 官方推理（img/255 -> RGB -> NCHW -> 推理 -> NCHW -> *255）
     //  - 不归一化到 ImageNet 均值（animevideov3 仅 /255）
     //  - intensity 围绕中性灰 0.5 做对比缩放（默认 1.0 = 不变）

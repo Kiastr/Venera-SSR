@@ -32,14 +32,14 @@ class V4ModelDef {
   });
 }
 
-/// v4 超分模型管理器：管理 Real-ESRGAN ONNX 模型（默认 4x animevideov3，可选 2x general-x2c）
-/// 的生命周期。支持多模型，所有对外方法按“当前选中模型”路由，调用方无需传 modelId。
+/// v4 超分模型管理器：管理 Anime4K v4 超分 ONNX 模型（默认官方 ACNet 2×，可选 Real-ESRGAN
+/// 4× / 通用 2×）的生命周期。支持多模型，所有对外方法按“当前选中模型”路由，调用方无需传 modelId。
 ///
 /// 模型获取策略（三选一，优先级从高到低）：
 ///  1. 自选外部模型（用户从本地导入，最高优先，绝不被覆盖）；
-///  2. 打包进 APK 的内置模型（首次运行经 [extractBundledModelIfNeeded] 抽取到应用目录，
-///     开箱即用、无需联网；2x 模型默认不打包，走下载）；
-///  3. 运行时下载（下载管理器保留：用户删除内置模型后可重新下载，或切换镜像/自选模型）。
+///  2. 打包进 APK 的内置模型（[extractBundledModelIfNeeded] 抽取到应用目录；当前所有模型均
+///     不打包，统一走下载，保持 APK 精简、可构建）；
+///  3. 运行时下载（下载管理器保留：用户删除模型后可重新下载，或切换镜像/自选模型）。
 ///
 /// 其他约定：
 ///  - 通过 [ColorizationService] 复用的 [com.github.kiastr.venera_ssr/colorize] MethodChannel
@@ -50,12 +50,24 @@ class Anime4KV4ModelManager {
   /// 模型注册表：4x 动画模型 + 2x 通用模型。新增权重只需在此追加一项。
   static final List<V4ModelDef> models = [
     V4ModelDef(
+      id: 'anime4k_acnet',
+      fileName: 'anime4k_acnet.onnx',
+      displayName: 'Anime4K v4 ACNet (2×)',
+      scale: 2,
+      sizeHintMB: 2,
+      bundledAssetPath: null, // 不再打包任何 onnx：ACNet 运行时下载（同 deoldify 模式），APK 始终精简
+      defaultUrls: [
+        'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/anime4k_acnet.onnx',
+        'https://github.com/Kiastr/Venera-SSR/releases/download/model/anime4k_acnet.onnx',
+      ],
+    ),
+    V4ModelDef(
       id: 'anime4k_x4',
       fileName: 'realesr_animevideov3.onnx',
-      displayName: '动画 4× (animevideov3)',
+      displayName: '动画 4× (Real-ESRGAN)',
       scale: 4,
       sizeHintMB: 4,
-      bundledAssetPath: 'assets/models/realesr_animevideov3.onnx',
+      bundledAssetPath: null, // 不再打包：保留为可选下载模型，不破坏原有功能
       defaultUrls: [
         'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_animevideov3.onnx',
         'https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_animevideov3.onnx',
@@ -64,10 +76,10 @@ class Anime4KV4ModelManager {
     V4ModelDef(
       id: 'general_x2',
       fileName: 'realesr_general_x2c.onnx',
-      displayName: '通用 2× (general-x2c)',
+      displayName: '通用 2× (Real-ESRGAN)',
       scale: 2,
       sizeHintMB: 8,
-      bundledAssetPath: null, // 2x 默认不打包，运行时下载
+      bundledAssetPath: null, // 运行时下载
       defaultUrls: [
         'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_general_x2c.onnx',
         'https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_general_x2c.onnx',
@@ -75,12 +87,12 @@ class Anime4KV4ModelManager {
     ),
   ];
 
-  /// 有效模型最小体积（2MB）。animevideov3 约 4MB、general-x2c 约 8MB，含此下限避免
-  /// 把损坏/空文件当有效模型。
-  static const int _validModelMinSize = 2 * 1024 * 1024;
+  /// 有效模型最小体积（512KB）。ACNet Compact 仅约 1–2MB、animevideov3 约 4MB、general-x2c 约 8MB；
+  /// 下限用于拦掉损坏/空文件（下载错误页通常仅数 KB），ACNet 较小故取 512KB。
+  static const int _validModelMinSize = 512 * 1024;
 
   static const String _selectedModelKey = 'anime4kV4_selected_model';
-  static String _selectedModelId = 'anime4k_x4';
+  static String _selectedModelId = 'anime4k_acnet';
 
   static List<String> _modelUrls = [];
   static bool _urlsLoaded = false;
