@@ -37,8 +37,8 @@ class V4ModelDef {
 ///
 /// 模型获取策略（三选一，优先级从高到低）：
 ///  1. 自选外部模型（用户从本地导入，最高优先，绝不被覆盖）；
-///  2. 打包进 APK 的内置模型（[extractBundledModelIfNeeded] 抽取到应用目录；当前所有模型均
-///     不打包，统一走下载，保持 APK 精简、可构建）；
+///  2. 打包进 APK 的内置模型（[extractBundledModelIfNeeded] 抽取到应用目录，开箱即用；
+///     ACNet 官方 onnx 仅 ~21KB 故打包，Real-ESRGAN 较大仍走下载，保持 APK 精简）；
 ///  3. 运行时下载（下载管理器保留：用户删除模型后可重新下载，或切换镜像/自选模型）。
 ///
 /// 其他约定：
@@ -55,7 +55,8 @@ class Anime4KV4ModelManager {
       displayName: 'Anime4K v4 ACNet (2×)',
       scale: 2,
       sizeHintMB: 2,
-      bundledAssetPath: null, // 不再打包任何 onnx：ACNet 运行时下载（同 deoldify 模式），APK 始终精简
+      // ACNet 官方 onnx 仅 ~21KB，远小于 4MB：直接打包进 APK，开箱即用（同 deoldify 模式）
+      bundledAssetPath: 'assets/models/anime4k_acnet.onnx',
       defaultUrls: [
         'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/anime4k_acnet.onnx',
         'https://github.com/Kiastr/Venera-SSR/releases/download/model/anime4k_acnet.onnx',
@@ -87,9 +88,9 @@ class Anime4KV4ModelManager {
     ),
   ];
 
-  /// 有效模型最小体积（512KB）。ACNet Compact 仅约 1–2MB、animevideov3 约 4MB、general-x2c 约 8MB；
-  /// 下限用于拦掉损坏/空文件（下载错误页通常仅数 KB），ACNet 较小故取 512KB。
-  static const int _validModelMinSize = 512 * 1024;
+  /// 有效模型最小体积（8KB）。ACNet onnx 仅 ~21KB、animevideov3 约 4MB、general-x2c 约 8MB；
+  /// 下限用于拦掉损坏/空文件（下载错误页通常仅数 KB，<8KB 视为无效）。
+  static const int _validModelMinSize = 8 * 1024;
 
   static const String _selectedModelKey = 'anime4kV4_selected_model';
   static String _selectedModelId = 'anime4k_acnet';

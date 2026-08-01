@@ -19,7 +19,9 @@ import kotlin.math.roundToLong
  * 上色/超分计算核心。三个函数严格对齐参考实现：
  *  - DeOldify 输入值域 0–255（不归一化），输出完整 BGR
  *  - DDColor  输入值域 0–1（/255），输出仅 ab 两通道，需与原图 L 拼接
- *  - ESRGAN   输入值域 0–1（/255），输出完整 RGB [1,3,scale·H,scale·W]；scale 由模型实际维度推导（见 getScale），支持 4x Real-ESRGAN 与 2x 官方 Anime4K v4 ACNet（模型无关，换权重无需改原生）
+ *  - ESRGAN   输入值域 0–1（/255），输出完整 RGB [1,3,scale·H,scale·W]；scale 由模型实际维度推导（见 getModelInfo）
+ *  - ACNet    官方 Anime4K v4：1 通道 Y 亮度 [1,1,H,W] -> [1,1,2H,2W]，走 YCrCb 管线（见 colorizeAcnet）
+ *             两者均模型无关（按输入通道数自动路由），换权重无需改原生
  *  - OpenCV float-LAB 真实范围 L∈[0,100]、a,b∈[−128,127]，必须用 OpenCV 转换
  *
  * 移植自 AiColorize（com.kiastr.aicolorize.ColorizeEngine），经真机模型端到端验证。
@@ -283,7 +285,10 @@ class ColorizeEngine {
     }
 
     // ----------------------------------------------------------------
-    // ESRGAN / ACNet：输入 0–1，输出完整 RGB；放大倍数由模型实际维度推导（见 getScale），当前支持 4x Real-ESRGAN 与 2x 官方 Anime4K v4 ACNet
+    // ESRGAN / ACNet：输入 0–1，放大倍数由模型实际维度推导（见 getModelInfo）。
+    //  - Real-ESRGAN：3 通道 RGB [1,3,H,W] -> [1,3,scale·H,scale·W]，全 RGB 管线；
+    //  - 官方 Anime4K v4 ACNet：1 通道 Y 亮度 [1,1,H,W] -> [1,1,2H,2W]，走 colorizeAcnet
+    //    （RGB -> YCrCb，Y 超分 + CbCr 双线性 -> 合并）。按输入通道数自动路由。
     // 对应 realesrgan 官方推理（img/255 -> RGB -> NCHW -> 推理 -> NCHW -> *255）
     //  - 不归一化到 ImageNet 均值（animevideov3 仅 /255）
     //  - intensity 围绕中性灰 0.5 做对比缩放（默认 1.0 = 不变）
@@ -306,6 +311,16 @@ class ColorizeEngine {
         useNnapi: Boolean,
         intensity: Float
     ): Bitmap {
+        // 先探测模型输入通道数：Real-ESRGAN 为 3(RGB)，官方 Anime4K v4 ACNet 为 1(Y 亮度)。
+        // 按通道路由到对应管线，模型无关——换权重无需改原生。
+        val cpuSession = modelManager.getSession(modelPath, false)
+        val info = getModelInfo(modelPath, cpuSession)
+        if (info.channels == 1) {
+            return colorizeAcnet(
+                inputBitmap, session, modelPath, useNnapi, intensity, info.scale
+            )
+        }
+
         val bgr = ImageUtils.bitmapToBgrMat(inputBitmap) // (H,W,3) BGR uint8
         val h = bgr.height()
         val w = bgr.width()
@@ -319,36 +334,129 @@ class ColorizeEngine {
         rgb.release()
 
         try {
-            // 放大倍数从模型实际输入/输出维度推导（探测一次并缓存），不再硬编码 4——
-            // 换 2x 模型时自动适配，无需改代码。用 CPU 会话探测，与 NNAPI 是否偏色无关。
-            val cpuSession = modelManager.getSession(modelPath, false)
-            val scale = getScale(modelPath, cpuSession)
+            // 放大倍数从模型实际输入/输出维度推导（探测一次并缓存），不再硬编码——
+            // 换 2x/3x/4x 权重时自动适配，无需改代码。用 CPU 会话探测，与 NNAPI 是否偏色无关。
+            val scale = info.scale
             if (!useNnapi) {
                 // CPU：输出恒正确，无需自检
-                return colorizeEsrganFixedTile(rgbF, h, w, session, intensity, scale, cpuRef = null)!!
+                val out = colorizeEsrganFixedTile(
+                    rgbF, h, w, session, intensity, scale, cpuRef = null, channels = 3
+                )!!
+                return rgbU8ToBitmap(out)
             }
             // NNAPI：首 tile 与 CPU 参考对比，拦截后端返回的错误颜色（典型如整体偏红）。
             // 旧逻辑只检测"全黑"，漏掉了"偏色但仍非黑"的损坏——某些设备的 NNAPI
             // 会把 Real-ESRGAN 输出染红而非归零，表现就是超分后发红。
-            val out = colorizeEsrganFixedTile(rgbF, h, w, session, intensity, scale, cpuRef = cpuSession)
-            if (out != null) return out
+            val out = colorizeEsrganFixedTile(
+                rgbF, h, w, session, intensity, scale, cpuRef = cpuSession, channels = 3
+            )
+            if (out != null) return rgbU8ToBitmap(out)
 
             // NNAPI 不可信 -> 整图切 CPU 重跑
-            return colorizeEsrganFixedTile(rgbF, h, w, cpuSession, intensity, scale, cpuRef = null)!!
+            val outCpu = colorizeEsrganFixedTile(
+                rgbF, h, w, cpuSession, intensity, scale, cpuRef = null, channels = 3
+            )!!
+            return rgbU8ToBitmap(outCpu)
         } finally {
             rgbF.release()
         }
     }
 
+    /** uint8 RGB [H,W,3] -> Bitmap（RGB -> BGR，bgrMatToBitmap 内部再做 BGR2RGBA） */
+    private fun rgbU8ToBitmap(outRgbU8: Mat): Bitmap {
+        val outBgr = Mat()
+        Imgproc.cvtColor(outRgbU8, outBgr, Imgproc.COLOR_RGB2BGR)
+        outRgbU8.release()
+        val bmp = ImageUtils.bgrMatToBitmap(outBgr)
+        outBgr.release()
+        return bmp
+    }
+
     /**
-     * 固定尺寸分块推理。
+     * 官方 Anime4K v4 ACNet 管线：模型只吃 1 通道 Y（亮度），色度通道双线性放大。
+     * RGB -> YCrCb -> Y 用 ACNet 超分 + Cr/Cb 双线性 2x -> 合并回 YCrCb -> BGR。
+     * 与 Anime4KCPP 官方 Android 集成一致（ACNet 即为此设计的 luma 超分器）。
+     */
+    private fun colorizeAcnet(
+        inputBitmap: Bitmap,
+        session: OrtSession,
+        modelPath: String,
+        useNnapi: Boolean,
+        intensity: Float,
+        scale: Int
+    ): Bitmap {
+        val bgr = ImageUtils.bitmapToBgrMat(inputBitmap)
+        val h = bgr.height()
+        val w = bgr.width()
+
+        val ycrcb = Mat()
+        Imgproc.cvtColor(bgr, ycrcb, Imgproc.COLOR_BGR2YCrCb)
+        val planes = ArrayList<Mat>(3)
+        Core.split(ycrcb, planes) // [Y, Cr, Cb]，Y 为亮度 uint8
+        bgr.release()
+        ycrcb.release()
+        val y = planes[0]
+        val cr = planes[1]
+        val cb = planes[2]
+
+        // Y -> float32 [0,1]
+        val yF = Mat()
+        y.convertTo(yF, CvType.CV_32F, 1.0 / 255.0)
+        y.release()
+
+        try {
+            val cpuSession = modelManager.getSession(modelPath, false)
+            val outY = if (!useNnapi) {
+                colorizeEsrganFixedTile(
+                    yF, h, w, session, intensity, scale, cpuRef = null, channels = 1
+                )!!
+            } else {
+                colorizeEsrganFixedTile(
+                    yF, h, w, session, intensity, scale, cpuRef = cpuSession, channels = 1
+                ) ?: colorizeEsrganFixedTile(
+                    yF, h, w, cpuSession, intensity, scale, cpuRef = null, channels = 1
+                )!!
+            }
+
+            // 色度双线性放大（保持 uint8，与 Y 输出合并）
+            val outW = w * scale
+            val outH = h * scale
+            val size = Size(outW.toDouble(), outH.toDouble())
+            val crUp = Mat()
+            Imgproc.resize(cr, crUp, size, 0.0, 0.0, Imgproc.INTER_LINEAR)
+            val cbUp = Mat()
+            Imgproc.resize(cb, cbUp, size, 0.0, 0.0, Imgproc.INTER_LINEAR)
+            cr.release()
+            cb.release()
+
+            // 合并 [Y_up, Cr_up, Cb_up] -> YCrCb -> BGR
+            val outYcrcb = Mat()
+            Core.merge(listOf(outY, crUp, cbUp), outYcrcb)
+            val outBgr = Mat()
+            Imgproc.cvtColor(outYcrcb, outBgr, Imgproc.COLOR_YCrCb2BGR)
+            outYcrcb.release()
+            val bmp = ImageUtils.bgrMatToBitmap(outBgr)
+            outBgr.release()
+            outY.release()
+            crUp.release()
+            cbUp.release()
+            return bmp
+        } finally {
+            yF.release()
+        }
+    }
+
+    /**
+     * 固定尺寸分块推理（模型无关，按 channels 区分 3 通道 RGB 与 1 通道 Y）。
+     * 返回 uint8 输出 Mat（3 通道 RGB 或 1 通道 Y），由调用方做颜色空间转换。
      * 返回 null 表示 NNAPI 首 tile 自检未过（全黑或偏色，后端不可信），由调用方回退 CPU。
      * cpuRef 非空时开启自检；为 null 时（CPU 路径或回退重跑）不做自检。
      */
     private fun colorizeEsrganFixedTile(
-        rgbF: Mat, h: Int, w: Int,
-        session: OrtSession, intensity: Float, scale: Int, cpuRef: OrtSession?
-    ): Bitmap? {
+        inputF: Mat, h: Int, w: Int,
+        session: OrtSession, intensity: Float, scale: Int, cpuRef: OrtSession?,
+        channels: Int
+    ): Mat? {
         val outH = h * scale
         val outW = w * scale
 
@@ -358,7 +466,7 @@ class ColorizeEngine {
         val core = tileIn - 2 * pad     // 每个 tile 实际贡献的有效边长 = 352
 
         // 全图 uint8 输出（native 内存，不占 ART 堆）
-        val outRgbU8 = Mat.zeros(outH, outW, CvType.CV_8UC(3))
+        val outU8 = Mat.zeros(outH, outW, CvType.CV_8UC(channels))
         val inputName = session.inputNames.iterator().next()
         var selfChecked = false
 
@@ -383,21 +491,21 @@ class ColorizeEngine {
                 val padRight = tileIn - padLeft - (sx1 - sx0)
                 val padBottom = tileIn - padTop - (sy1 - sy0)
 
-                val src = Mat(rgbF, Rect(sx0, sy0, sx1 - sx0, sy1 - sy0))
+                val src = Mat(inputF, Rect(sx0, sy0, sx1 - sx0, sy1 - sy0))
                 val tile = Mat()
                 Core.copyMakeBorder(
                     src, tile, padTop, padBottom, padLeft, padRight, Core.BORDER_REPLICATE
                 )
                 src.release()
 
-                // 推理：tile (tileIn,tileIn,3) float[0,1] -> (1,3,4*tileIn,4*tileIn) NCHW
+                // 推理：tile (tileIn,tileIn,channels) float[0,1] -> (1,channels,scale*tileIn,scale*tileIn) NCHW
                 val buf = ImageUtils.hwcToNchwFloatBuffer(tile)
                 val tensor = OnnxTensor.createTensor(
-                    env, buf, longArrayOf(1, 3, tileIn.toLong(), tileIn.toLong())
+                    env, buf, longArrayOf(1, channels, tileIn.toLong(), tileIn.toLong())
                 )
                 val results = session.run(Collections.singletonMap(inputName, tensor))
                 val outBuf = (results.get(0) as OnnxTensor).floatBuffer
-                val outTileRgb = ImageUtils.nchwToHwcMat(outBuf, 3, tileIn * scale, tileIn * scale)
+                val outTile = ImageUtils.nchwToHwcMat(outBuf, channels, tileIn * scale, tileIn * scale)
                 tensor.close()
                 results.close()
 
@@ -407,42 +515,44 @@ class ColorizeEngine {
                 // tile”上比对，且偏色比对排除近白像素（白底被 clip 在 1.0 看不出红偏，
                 // 暗部/墨线最明显），彻底消除白底稀释导致的漏检。
                 if (cpuRef != null && !selfChecked) {
-                    // 该 tile 是否含内容（三通道标准差之和 > 阈值，排除纯黑/纯白边框）
+                    // 该 tile 是否含内容（各通道标准差之和 > 阈值，排除纯黑/纯白边框）
                     val std = MatOfDouble(); val meanTmp = MatOfDouble()
                     Core.meanStdDev(tile, meanTmp, std)
                     var sumStd = 0.0
                     for (i in 0 until std.rows()) for (j in 0 until std.cols()) sumStd += std.get(i, j)[0]
                     val hasContent = sumStd > 0.02
                     if (hasContent) {
-                        val inMean = Core.mean(tile).`val`.let { (it[0] + it[1] + it[2]) / 3.0 }
-                        val outMean = Core.mean(outTileRgb).`val`.let { (it[0] + it[1] + it[2]) / 3.0 }
+                        val inMean = Core.mean(tile).`val`
+                        val outMean = Core.mean(outTile).`val`
+                        var inSum = 0.0; var outSum = 0.0
+                        for (i in 0 until channels) { inSum += inMean[i]; outSum += outMean[i] }
                         // 1) 全黑：输入非黑但输出全黑 => 后端异常（原自检逻辑保留）
-                        if (inMean > 0.05 && outMean < 0.01) {
-                            outTileRgb.release()
+                        if (inSum / channels > 0.05 && outSum / channels < 0.01) {
+                            outTile.release()
                             tile.release()
-                            outRgbU8.release()
+                            outU8.release()
                             return null
                         }
-                        // 2) 偏色：与 CPU 参考 tile 在“非近白像素”上比对，逐通道 MAE 超阈值即
+                        // 2) 偏色/失真：与 CPU 参考 tile 在“非近白像素”上比对，逐通道 MAE 超阈值即
                         //    判定后端返回了错误颜色（典型如整体偏红）。NNAPI 在部分设备上仅做
                         //    fp16 近似，正常数值误差远小于阈值；真偏色 MAE 通常在 0.1+，
                         //    阈值取 0.04（≈10/255）留足余量。非近白像素排除后，白底稀释不再漏检。
                         try {
                             val refBuf = ImageUtils.hwcToNchwFloatBuffer(tile)
                             val refTensor = OnnxTensor.createTensor(
-                                env, refBuf, longArrayOf(1, 3, tileIn.toLong(), tileIn.toLong())
+                                env, refBuf, longArrayOf(1, channels, tileIn.toLong(), tileIn.toLong())
                             )
                             val refRes = cpuRef.run(Collections.singletonMap(inputName, refTensor))
                             val refOut = (refRes.get(0) as OnnxTensor).floatBuffer
-                            val refTileRgb = ImageUtils.nchwToHwcMat(refOut, 3, tileIn * scale, tileIn * scale)
+                            val refTile = ImageUtils.nchwToHwcMat(refOut, channels, tileIn * scale, tileIn * scale)
                             refTensor.close()
                             refRes.close()
-                            val mae = maxChannelMaeOnContent(outTileRgb, refTileRgb)
-                            refTileRgb.release()
+                            val mae = maxChannelMaeOnContent(outTile, refTile, channels)
+                            refTile.release()
                             if (mae > NNAPI_COLOR_TOL) {
-                                outTileRgb.release()
+                                outTile.release()
                                 tile.release()
-                                outRgbU8.release()
+                                outU8.release()
                                 return null
                             }
                         } catch (_: Exception) {
@@ -455,12 +565,12 @@ class ColorizeEngine {
 
                 // 核心区在 tile 内恒定从 (pad,pad) 起（已验证与 x/y 是否贴边无关）
                 val cropRgb = Mat(
-                    outTileRgb,
+                    outTile,
                     Rect(pad * scale, pad * scale, coreW * scale, coreH * scale)
                 )
                 val cropCopy = Mat()
                 cropRgb.copyTo(cropCopy)
-                outTileRgb.release()
+                outTile.release()
 
                 // intensity：围绕 0.5 做对比缩放，在 float 空间计算避免截断误差
                 if (intensity != 1.0f) {
@@ -479,7 +589,7 @@ class ColorizeEngine {
                 cropCopy.release()
 
                 // 写入整图输出 ROI
-                val roi = Mat(outRgbU8, Rect(x * scale, y * scale, coreW * scale, coreH * scale))
+                val roi = Mat(outU8, Rect(x * scale, y * scale, coreW * scale, coreH * scale))
                 cropU8.copyTo(roi)
                 cropU8.release()
                 roi.release()
@@ -489,24 +599,18 @@ class ColorizeEngine {
             y += coreH
         }
 
-        // 整图偏色兜底（仅 NNAPI 路径）：在“非近白像素”上统计 R-G 均值，避免白底把
+        // 整图偏色兜底（仅 NNAPI + 3 通道 RGB 路径）：在“非近白像素”上统计 R-G 均值，避免白底把
         // 整体偏色均值稀释到阈值以下而漏检。命中即整图作废，由调用方切 CPU 重跑。
-        if (cpuRef != null) {
-            val bias = redShiftOnContent(outRgbU8)
+        // 单通道 Y 无颜色信息，不适用该检查。
+        if (cpuRef != null && channels == 3) {
+            val bias = redShiftOnContent(outU8)
             if (bias > NNAPI_COLOR_TOL_RGB) {
-                outRgbU8.release()
+                outU8.release()
                 return null
             }
         }
 
-        // RGB -> BGR（bgrMatToBitmap 内部再做 BGR2RGBA）
-        val outBgr = Mat()
-        Imgproc.cvtColor(outRgbU8, outBgr, Imgproc.COLOR_RGB2BGR)
-        outRgbU8.release()
-
-        val outBitmap = ImageUtils.bgrMatToBitmap(outBgr)
-        outBgr.release()
-        return outBitmap
+        return outU8
     }
 
     fun close() {
@@ -514,12 +618,23 @@ class ColorizeEngine {
     }
 
     /**
-     * 两个 float HWC Mat 的逐通道 mean absolute error，取三通道中的最大值。
-     * 仅在“非近白像素”（max(R,G,B) < 0.9）上统计，去除白底对偏色均值的稀释：
-     * 染红设备的红偏是加性偏移，白底被 clip 在 1.0 看不出，暗部/墨线最明显。
-     * 用于 NNAPI 输出与 CPU 参考的偏色比对。
+     * 两个 float HWC Mat 的逐通道 mean absolute error，取各通道中的最大值。
+     * 仅在“非近白像素”（max(R,G,B) < 0.9；单通道取 max < 0.9）上统计，
+     * 去除白底对偏色均值的稀释：染红设备的红偏是加性偏移，白底被 clip 在 1.0 看不出，
+     * 暗部/墨线最明显。用于 NNAPI 输出与 CPU 参考的偏色/失真比对。
      */
-    private fun maxChannelMaeOnContent(a: Mat, b: Mat): Double {
+    private fun maxChannelMaeOnContent(a: Mat, b: Mat, channels: Int = 3): Double {
+        if (channels == 1) {
+            val mask = Mat()
+            Core.compare(a, Scalar(0.9), mask, Core.CMP_LT) // 非近白像素
+            val total = Core.countNonZero(mask)
+            if (total == 0) { mask.release(); return 0.0 } // 整 tile 近白，无法判定，视为通过
+            val d = Mat()
+            Core.absdiff(a, b, d)
+            val m = Core.mean(d, mask).`val`
+            d.release(); mask.release()
+            return m[0]
+        }
         val ch = ArrayList<Mat>(3)
         Core.split(a, ch)
         val m1 = Mat(); val maxc = Mat()
@@ -559,37 +674,56 @@ class ColorizeEngine {
     }
 
     /**
-     * 从模型实际前向的输入/输出维度推导放大倍数（scale）。
+     * 模型信息：输入通道数（1 = Y 亮度/官方 ACNet，3 = RGB/Real-ESRGAN）+ 放大倍数。
      * 用一次极小的 dummy 前向（CPU 会话，与 NNAPI 是否偏色无关）测量输出/输入的空间比值，
-     * 按 modelPath 缓存。这样换 2x/4x 权重时无需改代码即可自动适配，当前 animevideov3 为 4x。
+     * 并按 modelPath 缓存。依次尝试 3 通道与 1 通道——Real-ESRGAN 吃 RGB，官方 ACNet 吃单通道 Y。
      *
      * 用输出 NCHW float buffer 的长度反推边长，避免依赖各 onnxruntime 版本输出 shape API 的差异。
      */
-    private val scaleCache = HashMap<String, Int>()
+    private class ModelInfo(val channels: Int, val scale: Int)
 
-    private fun getScale(modelPath: String, cpuSession: OrtSession): Int {
-        synchronized(scaleCache) {
-            scaleCache[modelPath]?.let { return it }
+    private val modelInfoCache = HashMap<String, ModelInfo>()
+
+    private fun getModelInfo(modelPath: String, cpuSession: OrtSession): ModelInfo {
+        synchronized(modelInfoCache) {
+            modelInfoCache[modelPath]?.let { return it }
         }
         val probeIn = 64 // 正方形小图，输出必为 (probeIn*scale)²，避免动态维度干扰
         val inputName = cpuSession.inputNames.iterator().next()
-        // 全零 dummy 即可：放大倍数只取决于形状，与具体数值无关
-        val dummy = Mat.zeros(probeIn, probeIn, CvType.CV_32FC(3))
-        val buf = ImageUtils.hwcToNchwFloatBuffer(dummy)
-        dummy.release()
-        val tensor = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, probeIn.toLong(), probeIn.toLong()))
-        val results = cpuSession.run(Collections.singletonMap(inputName, tensor))
-        val outBuf = (results.get(0) as OnnxTensor).floatBuffer
-        val total = outBuf.remaining().toLong()       // 1*3*outH*outW
-        val px = total / 3                            // outH*outW
-        val side = kotlin.math.sqrt(px.toDouble()).roundToLong() // 输入正方形 => 输出正方形
-        tensor.close()
-        results.close()
-        val scale = if (side > 0 && side % probeIn == 0L) (side / probeIn).toInt() else 4
-        synchronized(scaleCache) {
-            scaleCache[modelPath] = scale
+        var found: ModelInfo? = null
+        // 全零 dummy 即可：形状与具体数值无关。先试 3 通道（Real-ESRGAN），失败再试 1 通道（ACNet）。
+        for (ch in intArrayOf(3, 1)) {
+            try {
+                val dummy = Mat.zeros(
+                    probeIn, probeIn,
+                    if (ch == 3) CvType.CV_32FC(3) else CvType.CV_32FC(1)
+                )
+                val buf = ImageUtils.hwcToNchwFloatBuffer(dummy)
+                dummy.release()
+                val tensor = OnnxTensor.createTensor(
+                    env, buf, longArrayOf(1, ch, probeIn.toLong(), probeIn.toLong())
+                )
+                val results = cpuSession.run(Collections.singletonMap(inputName, tensor))
+                val outBuf = (results.get(0) as OnnxTensor).floatBuffer
+                val total = outBuf.remaining().toLong() // 1*ch*outH*outW
+                val px = total / ch
+                val side = kotlin.math.sqrt(px.toDouble()).roundToLong() // 输入正方形 => 输出正方形
+                tensor.close()
+                results.close()
+                val scale =
+                    if (side > 0 && side % probeIn == 0L) (side / probeIn).toInt()
+                    else if (ch == 1) 2 else 4
+                found = ModelInfo(ch, scale)
+                break
+            } catch (_: Exception) {
+                // 通道数不符（1ch 模型拒绝 3ch 输入等），尝试下一个
+            }
         }
-        return scale
+        val info = found ?: ModelInfo(3, 1)
+        synchronized(modelInfoCache) {
+            modelInfoCache[modelPath] = info
+        }
+        return info
     }
 
     /// 丢弃已缓存的 ONNX 会话（仅关闭 session，不释放 env）。

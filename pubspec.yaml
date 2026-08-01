@@ -110,9 +110,10 @@ flutter:
     - assets/tags.json
     - assets/tags_tw.json
     - assets/opencc.txt
+    - assets/models/anime4k_acnet.onnx
 # 注: deoldify_artistic.onnx 不打包到 assets，改为运行时下载
-# 注: v4 超分模型（anime4k_acnet.onnx / realesr_*.onnx）均不打包，改运行时下载
-#     （详见 Anime4KV4ModelManager）；APK 不再含任何 onnx，保持精简。
+# 注: anime4k_acnet.onnx (官方 ACNet 2x, ~21KB < 4MB) 打包进 APK，开箱即用；
+#     realesr_*.onnx (4-8MB) 不打包，运行时下载（详见 Anime4KV4ModelManager）。
 # fonts:
 
 flutter_to_arch:
