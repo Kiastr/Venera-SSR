@@ -296,8 +296,10 @@ class ColorizeEngine {
         val scale = 4
         val outH = h * scale
         val outW = w * scale
-        // 整图输出 float buffer 字节数 ≈ 3 * 4H * 4W * 4
-        val wholeOutBytes = 48L * h * w
+        // 整图输出在 ART 堆内的峰值：nchwToHwcMat 分配 FloatArray(3 * 4H * 4W)
+        // = 3 * 16 * h * w 个 float × 4 字节 = 192 * h * w 字节。
+        // （ORT 输出 tensor 与 OpenCV Mat 走堆外/native 内存，不计入 ART 堆）
+        val wholeOutBytes = 192L * h * w
         val SAFE = 120L * 1024 * 1024 // 120MB 余量，低于 ART 增长上限避免 OOM
         return if (wholeOutBytes <= SAFE) {
             // 小图：整图推理，沿用调用方后端（NNAPI 快且正确，与原行为一致）
