@@ -29,6 +29,11 @@ class ColorizeEngine {
         // NNAPI 输出与 CPU 参考逐通道 MAE 阈值（[0,1] 空间）；超过即判定偏色，整图回退 CPU。
         // NNAPI 在部分设备上仅做 fp16 近似，正常数值误差远小于此；真偏色（通道错位/染色）通常在 0.1+。
         private const val NNAPI_COLOR_TOL = 0.04
+        // 整图通道均值偏色阈值（uint8 空间 [0,255]）。仅 NNAPI 路径、全图推理完成后做一次：
+        // 真偏色表现为 R 通道独高、G≈B，R-G 均值远超正常图（正常动漫各色平均后 R≈G≈B，典型 < 20）；
+        // 实测染红设备 R-G 均值常 > 60，留足余量取 30。首 tile 的 MAE 检查会被顶部黑边蒙混
+        // （NNAPI 对全黑输入也输出近乎全黑，MAE≈0），故以全图均值作兜底。
+        private const val NNAPI_COLOR_TOL_RGB = 30.0
     }
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
@@ -468,6 +473,18 @@ class ColorizeEngine {
                 x += coreW
             }
             y += coreH
+        }
+
+        // 整图偏色自检（仅 NNAPI 路径，cpuRef != null）：首 tile 的逐通道 MAE 检查会被顶部
+        // 黑边蒙混（NNAPI 对全黑输入也输出近乎全黑，MAE≈0，漏检偏色），故改在全图推理完成
+        // 后做通道均值检查。真偏色表现为 R 通道独高、G≈B，R-G 均值远高于正常图；正常动漫
+        // 各色平均后 R≈G≈B，远小于阈值。命中即整图作废，由调用方切 CPU 重跑。
+        if (cpuRef != null) {
+            val m = Core.mean(outRgbU8).`val`
+            if (m[0] - m[1] > NNAPI_COLOR_TOL_RGB || m[0] - m[2] > NNAPI_COLOR_TOL_RGB) {
+                outRgbU8.release()
+                return null
+            }
         }
 
         // RGB -> BGR（bgrMatToBitmap 内部再做 BGR2RGBA）
