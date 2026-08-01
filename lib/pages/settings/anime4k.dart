@@ -4,7 +4,8 @@ part of 'settings_page.dart';
 ///
 /// 同时管理两个引擎版本：
 ///  - v1：纯 Dart CPU 算法（Gauss/Unblur/GradientRefine），缩放 1–4x，无模型文件；
-///  - v4：Real-ESRGAN(animevideov3) ONNX 模型，经原生 ONNX Runtime + NNAPI(GPU) 固定 4x 超分，仅 Android 生效。
+///  - v4：Real-ESRGAN ONNX 模型（默认 4x animevideov3，可选 2x general-x2c），经原生
+///    ONNX Runtime + NNAPI(GPU) 超分，倍数由模型实际维度决定（getScale 探测），仅 Android 生效。
 ///
 /// 两版本并存，由 `anime4KVersion` 设置选择；v4 选中时显示模型管理卡片，并隐藏 v1 专用滑块。
 class Anime4KSettings extends StatefulWidget {

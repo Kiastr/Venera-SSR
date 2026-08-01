@@ -12,6 +12,7 @@ import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import java.util.Collections
+import kotlin.math.roundToLong
 
 /**
  * 上色/超分计算核心。三个函数严格对齐参考实现：
